@@ -1,0 +1,10 @@
+{
+  "id": "qwen-code-quota",
+  "providerId": "qwen-code",
+  "label": "Qwen Code",
+  "mode": "remote-api",
+  "url": "http://127.0.0.1:62366/quota",
+  "format": "quota-v1",
+  "apiKeyEnv": "QWEN_CODE_QUOTA_ADAPTER_KEY",
+  "enabled": false
+}
