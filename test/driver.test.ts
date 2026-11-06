@@ -2,7 +2,6 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { make } from "@opencode/ai"
 import { model as createModel } from "@opencode/ai/providers/openai-compatible"
-import { effortBody } from "../src/inventory.js"
 import { API_BASE, prepareRequest } from "../src/transport.js"
 
 test("real 2.2.5 Chat driver lowers native body overlay and preserves tools/reasoning/fragmented SSE", async () => {
@@ -10,13 +9,13 @@ test("real 2.2.5 Chat driver lowers native body overlay and preserves tools/reas
   let calls = 0
   globalThis.fetch = async (input, init) => {
     calls++
-    const request = await prepareRequest(new Request(input, init), "fixture-access", ["qwen3.8-max"])
+    const request = await prepareRequest(new Request(input, init), "sk-sp-fixture", ["qwen3.8-max"], { plan: "token-plan" })
     assert.equal(request.url, `${API_BASE}/chat/completions`)
     const body = await request.json()
     assert.equal(body.stream, true)
     assert.deepEqual(body.stream_options, { include_usage: true })
     assert.equal(body.enable_thinking, true)
-    assert.equal(body.thinking_budget, 16384)
+    assert.equal(body.thinking_budget, undefined)
     assert.equal(body.reasoning_effort, undefined)
     assert.equal(body.tools[0].type, "function")
     assert.equal(body.tools[0].function.name, "lookup")
@@ -37,7 +36,7 @@ test("real 2.2.5 Chat driver lowers native body overlay and preserves tools/reas
   }
   try {
     const client = make()
-    const model = createModel("qwen3.8-max", { baseURL: API_BASE, apiKey: "placeholder", provider: "qwen-code", body: effortBody("medium") })
+    const model = createModel("qwen3.8-max", { baseURL: API_BASE, apiKey: "placeholder", provider: "qwencloud", body: { enable_thinking: true } })
     const events = []
     for await (const event of client.stream({ model, prompt: "fixture", tools: [{ name: "lookup", description: "Fixture tool", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } }], toolChoice: "auto" })) events.push(event)
     assert.equal(calls, 1)

@@ -2,13 +2,14 @@ import assert from "node:assert/strict"
 import { request } from "node:http"
 import { test } from "node:test"
 import { startQuotaBridge } from "../src/quota-bridge.js"
-import { getQwenQuota } from "../src/quota.js"
+import { getQwenCloudQuota, toQwenCloudQuotaV1 } from "../src/quota.js"
 
 const token = "test-only-adapter-key-01234567890123456789"
 
-test("bridge authenticates before calling native quota and returns only status", async () => {
+test("bridge authenticates before calling native quota and projects validated observations", async () => {
   let reads = 0
-  const bridge = await startQuotaBridge({ port: 0, token, getQuota: async () => { reads++; return getQwenQuota(true) } })
+  const quota = await getQwenCloudQuota()
+  const bridge = await startQuotaBridge({ port: 0, token, getQuota: async () => { reads++; return quota } })
   try {
     assert.equal(reads, 0)
     const unauthorized = await fetch(bridge.url)
@@ -17,16 +18,14 @@ test("bridge authenticates before calling native quota and returns only status",
     const response = await fetch(bridge.url, { headers: { Authorization: `Bearer ${token}` } })
     assert.equal(response.status, 200)
     assert.equal(response.headers.get("cache-control"), "no-store")
-    assert.deepEqual(await response.json(), { version: "quota-v1", entries: [{
-      kind: "value", name: "quota", label: "Qwen Code quota", resultType: "status", value: "Quota not exposed by Qwen Code",
-    }] })
+    assert.deepEqual(await response.json(), toQwenCloudQuotaV1(quota))
     assert.equal(reads, 1)
   } finally { await bridge.close() }
 })
 
 test("bridge rejects browser requests, wrong routes, host, method and request bodies", async () => {
   let reads = 0
-  const bridge = await startQuotaBridge({ port: 0, token, getQuota: async () => { reads++; return getQwenQuota() } })
+  const bridge = await startQuotaBridge({ port: 0, token, getQuota: async () => { reads++; return getQwenCloudQuota() } })
   try {
     for (const [url, init, status] of [
       [bridge.url, { headers: { Origin: "https://example.test" } }, 403],
@@ -56,15 +55,15 @@ test("bridge bounds stalled native calls and hides error details", async () => {
     assert.equal(response.status, 503)
     assert.deepEqual(await response.json(), { error: "Quota service unavailable" })
   } finally { await bridge.close() }
-  const invalid = await startQuotaBridge({ port: 0, token, getQuota: async () => ({ ...getQwenQuota(), amount: 10 }) })
+  const invalid = await startQuotaBridge({ port: 0, token, getQuota: async () => ({ ...await getQwenCloudQuota(), amount: 10 }) })
   try { assert.equal((await fetch(invalid.url, { headers: { Authorization: `Bearer ${token}` } })).status, 503) }
   finally { await invalid.close() }
 })
 
 test("bridge rejects malformed configuration and cancels active reads on close", async () => {
-  await assert.rejects(startQuotaBridge({ port: 0, token: "short", getQuota: async () => getQwenQuota() }))
+  await assert.rejects(startQuotaBridge({ port: 0, token: "short", getQuota: async () => getQwenCloudQuota() }))
   const signal = AbortSignal.abort()
-  await assert.rejects(startQuotaBridge({ port: 0, token, signal, getQuota: async () => getQwenQuota() }))
+  await assert.rejects(startQuotaBridge({ port: 0, token, signal, getQuota: async () => getQwenCloudQuota() }))
   let started!: () => void
   const entered = new Promise<void>(resolve => { started = resolve })
   let aborted = false
@@ -83,7 +82,7 @@ test("bridge rejects malformed configuration and cancels active reads on close",
 
 test("bridge rejects duplicate authorization headers before invoking quota", async () => {
   let reads = 0
-  const bridge = await startQuotaBridge({ port: 0, token, getQuota: async () => { reads++; return getQwenQuota() } })
+  const bridge = await startQuotaBridge({ port: 0, token, getQuota: async () => { reads++; return getQwenCloudQuota() } })
   try {
     const status = await new Promise<number | undefined>((resolve, reject) => {
       const outgoing = request(bridge.url, { headers: ["Authorization", `Bearer ${token}`, "Authorization", `Bearer ${token}`, "Host", new URL(bridge.url).host] }, response => { response.resume(); resolve(response.statusCode) })

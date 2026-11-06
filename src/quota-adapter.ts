@@ -3,11 +3,11 @@ import { pathToFileURL } from "node:url"
 import { OpenCode } from "@opencode/client"
 import { Service, type Endpoint } from "@opencode/client/service"
 import { startQuotaBridge, type QuotaBridge } from "./quota-bridge.js"
-import { qwenQuotaSchema, readQwenQuota } from "./quota.js"
+import { qwenCloudQuotaSchema, readQwenCloudQuota } from "./quota.js"
 
 const quotaRPC = {
-  id: "qwen-code",
-  methods: { quota: { input: { type: "object", additionalProperties: false }, output: qwenQuotaSchema } },
+  id: "qwencloud",
+  methods: { quota: { input: { type: "object", additionalProperties: false }, output: qwenCloudQuotaSchema } },
   events: {},
 } as const
 
@@ -42,7 +42,7 @@ function boundedRpcFetch(endpoint: Endpoint, directory: string, fetcher: typeof 
   return async (input, init) => {
     const request = new Request(input, { ...init, redirect: "error" })
     const url = new URL(request.url)
-    if (url.origin !== base.origin || url.pathname !== "/api/rpc/qwen-code/quota" || url.hash || request.method !== "POST" || url.searchParams.size !== 1 || url.searchParams.get("location[directory]") !== directory) throw new Error("Quota service unavailable.")
+    if (url.origin !== base.origin || url.pathname !== "/api/rpc/qwencloud/quota" || url.hash || request.method !== "POST" || url.searchParams.size !== 1 || url.searchParams.get("location[directory]") !== directory) throw new Error("Quota service unavailable.")
     request.signal.throwIfAborted()
     const pending = fetcher(request).then(response => {
       if (request.signal.aborted) {
@@ -52,7 +52,7 @@ function boundedRpcFetch(endpoint: Endpoint, directory: string, fetcher: typeof 
       return response
     })
     const response = await cancellable(pending, request.signal)
-    if (!response.ok || response.redirected || !response.body || Number(response.headers.get("content-length")) > 8_192 || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "")) {
+    if (!response.ok || response.redirected || !response.body || Number(response.headers.get("content-length")) > 32_768 || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "")) {
       void response.body?.cancel().catch(() => {})
       throw new Error("Quota service unavailable.")
     }
@@ -64,7 +64,7 @@ function boundedRpcFetch(endpoint: Endpoint, directory: string, fetcher: typeof 
         const { value, done } = await cancellable(reader.read(), request.signal)
         if (done) break
         size += value.byteLength
-        if (size > 8_192) throw new Error("Quota service unavailable.")
+        if (size > 32_768) throw new Error("Quota service unavailable.")
         if (value.byteLength) chunks.push(value)
       }
       return new Response(Buffer.concat(chunks), { headers: { "Content-Type": "application/json" } })
@@ -91,7 +91,7 @@ export async function startQuotaAdapter(options: QuotaAdapterOptions): Promise<Q
         signal.throwIfAborted()
         const fetch = boundedRpcFetch(endpoint, location.directory, options.fetch ?? globalThis.fetch)
         const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint), fetch })
-        return readQwenQuota(await client.rpc(quotaRPC).quota({}, { location, signal }))
+        return readQwenCloudQuota(await client.rpc(quotaRPC).quota({}, { location, signal }))
       } catch { throw new Error("Quota service unavailable.") }
     },
   })
@@ -108,7 +108,7 @@ export function quotaAdapterConfig(args: readonly string[], env: Readonly<Record
   const location = flags.get("--location")
   const rawPort = flags.get("--port") ?? "62366"
   const port = Number(rawPort)
-  const keyEnv = flags.get("--api-key-env") ?? "QWEN_CODE_QUOTA_ADAPTER_KEY"
+  const keyEnv = flags.get("--api-key-env") ?? "QWENCLOUD_QUOTA_ADAPTER_KEY"
   if (!location || !validLocation(location) || !/^\d{1,5}$/.test(rawPort) || !Number.isInteger(port) || port < 1 || port > 65_535 || !/^[A-Z][A-Z0-9_]{0,127}$/.test(keyEnv)) throw new Error("Invalid quota adapter configuration.")
   const token = env[keyEnv]?.trim()
   if (!token || !/^[\x21-\x7e]{32,512}$/.test(token)) throw new Error("Invalid quota adapter configuration.")
@@ -122,7 +122,7 @@ async function main(): Promise<void> {
   process.once("SIGTERM", stop)
   try {
     const adapter = await startQuotaAdapter({ ...quotaAdapterConfig(process.argv.slice(2)), signal: controller.signal })
-    process.stdout.write("Qwen Code quota status adapter is ready.\n")
+    process.stdout.write("QwenCloud quota adapter is ready.\n")
     try {
       await new Promise<void>(resolve => {
         if (controller.signal.aborted) resolve()

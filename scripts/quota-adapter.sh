@@ -3,15 +3,15 @@ set +x
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-unit=opencode-qwen-code-quota-adapter.service
-description="OpenCode Qwen Code standalone quota status adapter v1"
+unit=opencode-qwencloud-quota-adapter.service
+description="OpenCode QwenCloud standalone quota adapter v1"
 action="${1:-}"
 [[ $# -gt 0 ]] && shift
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 case "$action" in
   start|run)
     location= port=62366 port_seen= key_seen=
-    key_file="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/qwen-code/quota-adapter.key"
+    key_file="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/qwencloud/quota-adapter.key"
     while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || fail 'Every option requires a value.'
       case "$1" in

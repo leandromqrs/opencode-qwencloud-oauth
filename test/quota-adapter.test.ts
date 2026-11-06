@@ -2,18 +2,19 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { Endpoint } from "@opencode/client/service"
 import { quotaAdapterConfig, startQuotaAdapter } from "../src/quota-adapter.js"
-import { getQwenQuota } from "../src/quota.js"
+import { getQwenCloudQuota } from "../src/quota.js"
 
 const token = "test-only-adapter-key-01234567890123456789"
 const endpoint: Endpoint = { url: "http://127.0.0.1:4096", auth: { type: "basic", username: "test", password: "native-test-only-password" } }
 
 test("adapter config requires explicit location and a separate Qwen adapter key", () => {
-  assert.deepEqual(quotaAdapterConfig(["--location", "/workspace"], { QWEN_CODE_QUOTA_ADAPTER_KEY: token }), { location: "/workspace", port: 62366, token })
-  assert.throws(() => quotaAdapterConfig([], { QWEN_CODE_QUOTA_ADAPTER_KEY: token }))
-  assert.throws(() => quotaAdapterConfig(["--location", "relative"], { QWEN_CODE_QUOTA_ADAPTER_KEY: token }))
+  assert.deepEqual(quotaAdapterConfig(["--location", "/workspace"], { QWENCLOUD_QUOTA_ADAPTER_KEY: token }), { location: "/workspace", port: 62366, token })
+  assert.throws(() => quotaAdapterConfig([], { QWENCLOUD_QUOTA_ADAPTER_KEY: token }))
+  assert.throws(() => quotaAdapterConfig(["--location", "relative"], { QWENCLOUD_QUOTA_ADAPTER_KEY: token }))
   assert.throws(() => quotaAdapterConfig(["--location", "/workspace"], { JUNIE_QUOTA_ADAPTER_KEY: token }))
-  assert.throws(() => quotaAdapterConfig(["--location", "/workspace", "--port", "0"], { QWEN_CODE_QUOTA_ADAPTER_KEY: token }))
-  assert.throws(() => quotaAdapterConfig(["--location", "/workspace", "--location", "/other"], { QWEN_CODE_QUOTA_ADAPTER_KEY: token }))
+  assert.throws(() => quotaAdapterConfig(["--location", "/workspace"], { QWEN_CODE_QUOTA_ADAPTER_KEY: token }))
+  assert.throws(() => quotaAdapterConfig(["--location", "/workspace", "--port", "0"], { QWENCLOUD_QUOTA_ADAPTER_KEY: token }))
+  assert.throws(() => quotaAdapterConfig(["--location", "/workspace", "--location", "/other"], { QWENCLOUD_QUOTA_ADAPTER_KEY: token }))
 })
 
 test("adapter does not discover at startup or before adapter authentication", async () => {
@@ -30,22 +31,22 @@ test("adapter does not discover at startup or before adapter authentication", as
   } finally { await adapter.close() }
 })
 
-test("adapter uses only authenticated native qwen-code quota RPC with explicit location", async () => {
+test("adapter uses only authenticated native qwencloud quota RPC with explicit location", async () => {
   const requests: Request[] = []
   const adapter = await startQuotaAdapter({ location: "/workspace", token, port: 0, discover: async () => endpoint, fetch: async input => {
     const request = input as Request
     requests.push(request)
-    return Response.json({ output: getQwenQuota(false) })
+    return Response.json({ output: await getQwenCloudQuota() })
   } })
   try {
     const response = await fetch(adapter.url, { headers: { Authorization: `Bearer ${token}` } })
     assert.equal(response.status, 200)
     const body = await response.json() as { entries: { value: string }[] }
-    assert.equal(body.entries[0].value, "Not signed in; quota not exposed by Qwen Code")
+    assert.equal(body.entries[0].value, "Not signed in")
     assert.equal(requests.length, 1)
     const request = requests[0]
     const url = new URL(request.url)
-    assert.equal(url.origin + url.pathname, "http://127.0.0.1:4096/api/rpc/qwen-code/quota")
+    assert.equal(url.origin + url.pathname, "http://127.0.0.1:4096/api/rpc/qwencloud/quota")
     assert.equal(request.method, "POST")
     assert.equal(request.redirect, "error")
     assert.match(request.headers.get("authorization") ?? "", /^Basic /)
@@ -73,8 +74,8 @@ test("adapter refuses non-loopback endpoints and missing native authentication",
 
 test("adapter refuses oversized, redirected and fabricated native results", async () => {
   for (const reply of [
-    () => Response.json({ output: { ...getQwenQuota(), credits: 100 } }),
-    () => new Response("x".repeat(8193), { headers: { "Content-Type": "application/json" } }),
+    async () => Response.json({ output: { ...await getQwenCloudQuota(), credits: 100 } }),
+    () => new Response("x".repeat(32769), { headers: { "Content-Type": "application/json" } }),
     () => new Response("{}", { status: 302, headers: { Location: "https://example.test" } }),
   ]) {
     const adapter = await startQuotaAdapter({ location: "/workspace", token, port: 0, discover: async () => endpoint, fetch: async () => reply() })
@@ -93,7 +94,7 @@ test("adapter rediscovers the native owner for each authenticated panel read", a
     discover: async () => ({ ...endpoint, url: `http://127.0.0.1:${4096 + discoveries++}` }),
     fetch: async input => {
       origins.push(new URL((input as Request).url).origin)
-      return Response.json({ output: getQwenQuota(true) })
+      return Response.json({ output: await getQwenCloudQuota() })
     },
   })
   try {

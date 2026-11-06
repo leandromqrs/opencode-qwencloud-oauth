@@ -1,37 +1,39 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { discoverCatalog, parseListing } from "../src/catalog.js"
+import { discoverCatalog, parseListing, sanitizeSavedModels } from "../src/catalog.js"
 import { nativeModel, reconcileCatalog, METADATA_SOURCE } from "../src/inventory.js"
 
-test("catalog uses actual IDs only and ignores unverified endpoint metadata", () => {
-  assert.deepEqual(parseListing({ data: [{ id: " qwen3.8-max ", context: 42 }, { id: "new-model" }, { id: "new-model" }] }), [{ id: "qwen3.8-max" }, { id: "new-model" }])
-  assert.throws(() => parseListing({ data: [{ id: "bad\nmodel" }] }))
+const wire = (items: unknown[]) => ({ code: "200", data: { Data: [{ Items: items }] } })
+test("catalog sanitizes actual management metadata and never embeds subscription assumptions", () => {
+  assert.deepEqual(parseListing(wire([{ Model: "new-model" }, { Model: "new-model" }])), [{ id: "new-model" }])
+  assert.throws(() => parseListing(wire([{ Model: "bad\nmodel" }])))
+  assert.deepEqual(parseListing(wire([])), [])
   assert.throws(() => parseListing({ data: [] }))
-  const models = reconcileCatalog({ fetchedAt: 1, models: [{ id: "new-model" }] })
-  assert.equal(models[0].context, null)
-  assert.deepEqual(models[0].efforts, [])
-  assert.deepEqual(nativeModel(models[0]).limit, { context: 0, output: 0 })
-  assert.deepEqual(nativeModel(models[0]).cost, [])
-  assert.match(METADATA_SOURCE, /v0.26.8/)
+  const model = reconcileCatalog({ fetchedAt: 1, models: [{ id: "qwen3.8-max" }] })[0]
+  assert.equal(model.context, null)
+  assert.deepEqual(model.efforts, [])
+  assert.deepEqual(nativeModel(model).limit, { context: 0, output: 0 })
+  assert.deepEqual(nativeModel(model).cost, [])
+  assert.deepEqual(nativeModel(model).variants, [])
+  assert.match(METADATA_SOURCE, /QwenCloud\/qwencloud-cli/)
 })
 
-test("only known subscription IDs receive embedded limits and budget variants", () => {
-  const models = reconcileCatalog({ fetchedAt: 1, models: [{ id: "qwen3.8-max" }, { id: "qwen3.8-flash" }] })
-  const native = nativeModel(models[0])
-  assert.equal(native.package, "@opencode/ai/providers/openai-compatible")
-  assert.equal(native.limit.context, 1_000_000)
-  assert.deepEqual(native.variants.map(v => v.id), ["off", "low", "medium", "high"])
-  assert.deepEqual(native.variants.find(v => v.id === "medium")?.body, { enable_thinking: true, thinking_budget: 16384 })
+test("rich catalog limits and modalities are sanitized without claiming tools or entitlement", () => {
+  const listing = parseListing(wire([{ Model: "vision-model", ModelInfo: { ContextWindow: 65536, MaxInputTokens: 60000, MaxOutputTokens: 4096 }, InferenceMetadata: { RequestModality: ["Text", "Image", "PRIVATE"], ResponseModality: ["Text"] }, email: "PRIVATE" }]))
+  const native = nativeModel(reconcileCatalog({ fetchedAt: 1, models: listing })[0])
+  assert.equal(native.limit.context, 65536)
+  assert.equal(native.limit.output, 4096)
+  assert.deepEqual(native.capabilities.input, ["text", "image"])
+  assert.equal(native.capabilities.tools, false)
+  assert.doesNotMatch(JSON.stringify(listing), /PRIVATE/)
+  assert.deepEqual(sanitizeSavedModels([{ id: "model", context: -1, output: Infinity, secret: "PRIVATE" }]), [{ id: "model" }])
 })
 
-test("discovery pins destination, rejects redirects, bounds response, preserves 403", async () => {
-  const result = await discoverCatalog("fixture", async (input, init) => {
-    assert.equal(String(input), "https://api.qwen.ai/compatible-mode/v1/models")
-    assert.equal(init?.redirect, "error")
-    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture")
-    return Response.json({ data: [{ id: "account-model" }] })
-  })
-  assert.deepEqual(result.models, [{ id: "account-model" }])
-  await assert.rejects(discoverCatalog("fixture", async () => Response.json({ error: { message: "PRIVATE" } }, { status: 403 })), error => error instanceof Error && "status" in error && error.status === 403 && !error.message.includes("PRIVATE"))
+test("discovery rejects redirects, oversized bodies and preserves HTTP and business denials", async () => {
+  for (const status of [401, 403]) {
+    await assert.rejects(discoverCatalog("fixture", async () => Response.json({ message: "PRIVATE" }, { status })), error => error instanceof Error && "status" in error && error.status === status && !error.message.includes("PRIVATE"))
+    await assert.rejects(discoverCatalog("fixture", async () => Response.json({ code: String(status), message: "PRIVATE" })), error => error instanceof Error && "status" in error && error.status === status)
+  }
   await assert.rejects(discoverCatalog("fixture", async () => new Response("x".repeat(1024 * 1024 + 1))), /invalid_response/)
+  await assert.rejects(discoverCatalog("fixture", async () => { throw new TypeError("redirect secret") }), /network_error/)
 })

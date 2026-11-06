@@ -31,7 +31,7 @@ test("management script rejects unrelated units and never manages Junie", async 
   const directory = await mkdtemp(join(tmpdir(), "qwen-quota-manager-test-"))
   const script = new URL("../scripts/quota-adapter.sh", import.meta.url)
   try {
-    await writeFile(join(directory, "systemctl"), "#!/bin/sh\n[ \"$3\" = opencode-qwen-code-quota-adapter.service ] || exit 98\ncase \"$*\" in\n*--property=LoadState*) echo loaded;;\n*--property=Description*) echo unrelated;;\n*--property=Transient*) echo yes;;\n*) exit 99;;\nesac\n", { mode: 0o700 })
+    await writeFile(join(directory, "systemctl"), "#!/bin/sh\n[ \"$3\" = opencode-qwencloud-quota-adapter.service ] || exit 98\ncase \"$*\" in\n*--property=LoadState*) echo loaded;;\n*--property=Description*) echo unrelated;;\n*--property=Transient*) echo yes;;\n*) exit 99;;\nesac\n", { mode: 0o700 })
     const result = spawnSync("bash", [script.pathname, "stop"], { env: { ...process.env, PATH: `${directory}:${process.env.PATH}` }, encoding: "utf8" })
     assert.equal(result.status, 1)
     assert.match(result.stderr, /unrelated unit/)

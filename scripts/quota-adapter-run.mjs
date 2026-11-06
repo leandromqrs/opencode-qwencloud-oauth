@@ -31,7 +31,7 @@ async function main() {
   if (!location || !isAbsolute(location)) throw new Error("Explicit absolute location required")
   const token = await readAdapterKeyFile(flags.get("--key-file"))
   const { quotaAdapterConfig, startQuotaAdapter } = await import("../dist/quota-adapter.js")
-  const config = quotaAdapterConfig(["--location", location, "--port", flags.get("--port") ?? "62366"], { QWEN_CODE_QUOTA_ADAPTER_KEY: token })
+  const config = quotaAdapterConfig(["--location", location, "--port", flags.get("--port") ?? "62366"], { QWENCLOUD_QUOTA_ADAPTER_KEY: token })
   const controller = new AbortController()
   const stop = () => controller.abort()
   process.once("SIGTERM", stop)

@@ -1,12 +1,12 @@
 import { createHash, timingSafeEqual } from "node:crypto"
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import type { Socket } from "node:net"
-import { toQwenQuotaV1, type QwenQuota } from "./quota.js"
+import { toQwenCloudQuotaV1, type QwenCloudQuota } from "./quota.js"
 
 export interface QuotaBridgeOptions {
   port: number
   token: string
-  getQuota: (signal: AbortSignal) => Promise<QwenQuota>
+  getQuota: (signal: AbortSignal) => Promise<QwenCloudQuota>
   signal?: AbortSignal
   requestTimeoutMs?: number
 }
@@ -38,7 +38,7 @@ function reject(response: ServerResponse, status: number): void {
   send(response, status, JSON.stringify({ error: status === 503 ? "Quota service unavailable" : "Request rejected" }))
 }
 
-async function loadQuota(getQuota: QuotaBridgeOptions["getQuota"], signal: AbortSignal): Promise<QwenQuota> {
+async function loadQuota(getQuota: QuotaBridgeOptions["getQuota"], signal: AbortSignal): Promise<QwenCloudQuota> {
   let onAbort: (() => void) | undefined
   const cancelled = new Promise<never>((_resolve, reject) => {
     onAbort = () => reject(new Error("Cancelled"))
@@ -102,7 +102,7 @@ export async function startQuotaBridge(options: QuotaBridgeOptions): Promise<Quo
     const onClose = () => controller.abort()
     response.once("close", onClose)
     const timer = setTimeout(onClose, timeoutMs)
-    try { send(response, 200, JSON.stringify(toQwenQuotaV1(await loadQuota(options.getQuota, controller.signal)))) }
+    try { send(response, 200, JSON.stringify(toQwenCloudQuotaV1(await loadQuota(options.getQuota, controller.signal)))) }
     catch { reject(response, 503) }
     finally {
       clearTimeout(timer)

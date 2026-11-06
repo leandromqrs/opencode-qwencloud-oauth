@@ -15,13 +15,14 @@ export function memoryStorage() {
 
 export function fixtureContext(storage = memoryStorage().storage) {
   let connection: ActiveConnection | undefined = { type: "credential", id: "fixture-account" as never, method: "oauth", label: "PRIVATE-EMAIL" }
+  let expires = Date.now() + 3600_000
   let resolves = 0
   const ctx = {
     storage,
     integration: { connection: {
       active: () => Effect.sync(() => connection),
-      resolve: () => Effect.sync(() => { resolves++; return { type: "oauth", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 3600_000 } }),
+      resolve: () => Effect.sync(() => { resolves++; return { type: "oauth", access: "fixture-access", refresh: "", expires } }),
     } },
   } as unknown as Plugin.Context
-  return { ctx, setConnection: (value: ActiveConnection | undefined) => { connection = value }, resolves: () => resolves }
+  return { ctx, setConnection: (value: ActiveConnection | undefined) => { connection = value }, setExpiry: (value: number) => { expires = value }, resolves: () => resolves }
 }

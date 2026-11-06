@@ -19,33 +19,39 @@ test("native plugin registers OAuth/RPC without startup HTTP; inference blocks b
   const handlers: Record<string, () => Effect.Effect<any>> = {}
   const hooks = new Map<string, (event: any) => Effect.Effect<void>>()
   const registration = { dispose: Effect.void, events: { emit: () => Effect.void } }
-  const integration = { id: "qwen-code-oauth", name: "" }
+  const integration = { id: "qwencloud-oauth", name: "" }
   const original = globalThis.fetch
   globalThis.fetch = async () => { requests++; throw new Error("network forbidden") }
+  const storage = memoryStorage()
   const ctx = {
-    options: {}, storage: memoryStorage().storage, event: { subscribe: () => Stream.empty },
+    options: {}, storage: storage.storage, event: { subscribe: () => Stream.empty },
     provider: { transform: (fn: any) => Effect.sync(() => { fn({ add: (value: unknown) => { inventory = value } }); return registration }), reload: () => Effect.void },
     integration: {
       transform: (fn: any) => Effect.sync(() => { fn({ method: { update: (value: typeof auth) => { auth = value } }, update: (_id: string, cb: (value: typeof integration) => void) => cb(integration) }); return registration }),
       connection: { active: () => Effect.succeed({ type: "credential", id: "fixture", method: "oauth", label: "PRIVATE" }), resolve: () => Effect.sync(() => { resolves++; throw new Error("must not resolve") }) },
     },
-    rpc: { register: (definition: any, implementations: typeof handlers) => Effect.sync(() => { assert.equal(definition.id, "qwen-code"); Object.assign(handlers, implementations); return registration }) },
-    session: { hook: (name: string, callback: any, scope: any) => Effect.sync(() => { assert.equal(scope.providerID, "qwen-code"); hooks.set(name, callback); return registration }) },
+    rpc: { register: (definition: any, implementations: typeof handlers) => Effect.sync(() => { assert.equal(definition.id, "qwencloud"); Object.assign(handlers, implementations); return registration }) },
+    session: { hook: (name: string, callback: any, scope: any) => Effect.sync(() => { assert.equal(scope.providerID, "qwencloud"); hooks.set(name, callback); return registration }) },
   }
   const scope = await Effect.runPromise(Scope.make())
   try {
     await Effect.runPromise(plugin.effect(ctx as unknown as Plugin.Context).pipe(Scope.provide(scope)))
-    assert.equal(plugin.id, "opencode-qwen-code-oauth")
+    assert.equal(plugin.id, "opencode-qwencloud-oauth")
     assert.equal(inventory.info.package, "@opencode/ai/providers/openai-compatible")
     assert.deepEqual(inventory.models, [])
-    assert.equal(integration.name, "Qwen Code")
-    assert.equal(auth?.integrationID, "qwen-code-oauth")
+    assert.equal(integration.name, "QwenCloud")
+    assert.equal(auth?.integrationID, "qwencloud-oauth")
     assert.equal(auth?.method.id, "device")
-    assert.equal(auth?.method.label, "Sign in with Qwen Plus / Pro")
+    assert.equal(auth?.method.label, "Sign in with QwenCloud")
     assert.deepEqual(Object.keys(handlers).sort(), ["catalog", "quota", "refresh", "status"])
     await assert.rejects(Effect.runPromise(hooks.get("http.request")!({})), /host correction/)
-    assert.deepEqual(await Effect.runPromise(handlers.quota()), { state: "unavailable", reason: "unsupported", message: "Quota not exposed by Qwen Code", connected: true })
     assert.equal(resolves, 0)
+    assert.equal(requests, 0)
+    assert.deepEqual([...storage.values.keys()], ["device-client-id:v1"])
+    const deviceID = storage.values.get("device-client-id:v1")
+    assert.match(String(deviceID), /^[a-f0-9-]{36}$/)
+    await Effect.runPromise(plugin.effect(ctx as unknown as Plugin.Context).pipe(Scope.provide(scope)))
+    assert.equal(storage.values.get("device-client-id:v1"), deviceID)
     assert.equal(requests, 0)
   } finally { await Effect.runPromise(Scope.close(scope, Exit.void)); globalThis.fetch = original }
 })
@@ -64,7 +70,7 @@ test("native authorization scope disposal cancels an in-flight token poll", asyn
   let aborted = false
   const original = globalThis.fetch
   globalThis.fetch = async (input, init) => {
-    if (String(input).endsWith("device/code")) return Response.json({ device_code: "private-device", user_code: "ABCD", verification_uri: "https://chat.qwen.ai/authorize", verification_uri_complete: "https://chat.qwen.ai/authorize?user_code=ABCD&client=qwen-code", expires_in: 120, interval: 0.001 })
+    if (new URL(String(input)).pathname === "/cli/device/code") return Response.json({ Success: true, Data: { Token: "private-device", VerificationUrl: `https://account.qwencloud.com/sso/OIDCAuth?${new URLSearchParams({ app_type: "synthetic-app", lang: "en-US", auth_token: "synthetic-browser", oauth_callback: "https://www.qwencloud.com/oauth/confirm?auth_token=synthetic-callback" })}`, ExpiresIn: 120, Interval: 0.001 } })
     started()
     return new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => { aborted = true; reject(new Error("cancelled")) }, { once: true }))
   }
