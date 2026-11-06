@@ -33,12 +33,22 @@ Sources: [request adapter](https://github.com/QwenCloud/qwencloud-cli/blob/26499
 
 The [invocation resolver](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/services/invocation-credential-resolver.ts) obtains API keys separately from management OAuth. Model calls use the compatible Chat endpoint, not the control-plane gateway.
 
-Current documented OpenAI bases are `https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1` for PAYG and `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` for Token Plan. The inspected CLI still contains older Alibaba endpoint defaults. The replacement must verify its routing explicitly, never silently fall back to PAYG, and never send management tokens to model endpoints.
+For parity with the inspected CLI, the native driver uses `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` for Token Plan. Token Plan keys use the `sk-sp-` prefix. Although the isolated transport utility knows the CLI's DashScope Intl destination, the registered driver accepts Token Plan keys only: it never falls back to PAYG or sends management tokens to model endpoints.
 
-Live OAuth, account catalog and key provisioning remain pending. Inference also remains blocked by the installed OpenCode host transport limitation.
+Native OAuth completion and authenticated catalog discovery were verified on 2026-11-06: the account returned 186 catalog entries. Catalog visibility does not establish model entitlement. Token Plan reads selected the seat route but returned an unrecognized summary shape; no balance or absence of subscription has been established.
 
-## Key-provisioning evidence and remaining boundary
+The native driver provides an operation-scoped `FetchHttpClient.Fetch` implementation. It applies `prepareRequest` after host HTTP-hook serialization and immediately before fetch, so redirect refusal and cancellation are not lost in that conversion. A scope-owned deadline and explicit response-reader cancellation keep streaming timeouts effective through garbage collection. Tests exercise the host conversion sequence, real loopback sockets and compiled provider loading with separate Effect copies. No host binary patch, global fetch replacement or unsafe bypass is required.
+
+On 2026-11-06, the user supplied a separate key through a private secret prompt; it was stored through OpenCode's native key connection, not in project files. Two minimal native chat checks reached the provider: `qwen3.6-plus` was denied as unpurchased, and `qwen3.7-plus` returned exhausted monthly quota with reset on November 14 at 16:00 UTC. These are live provider errors, not successful model generations. No automatic purchase, quota retry or alternate-plan fallback was attempted.
+
+## Explicit inference key flow
 
 The inspected CLI's login does not create inference keys. Missing keys direct users to the console's API Keys page. Public console assets expose separate operations for PAYG, personal Token Plan and team Token Plan key creation, but their shared browser transport uses session cookies and CSRF handling. That does not establish that a CLI Bearer management token can invoke those actions through the CLI gateway.
 
-No account key was created, reset, revealed or revoked. Automatic provisioning remains pending verification of that bridge and the correct plan/account/workspace scope; the plugin reports `keyProvisioning: unavailable-contract` rather than pretending login created a usable key.
+The integration follows the CLI rather than those browser-only operations: users create a key at `https://home.qwencloud.com/api-keys` and supply it separately. No account key was created, reset, revealed or revoked. Automatic provisioning and experimental console key probes are not part of this flow.
+
+## Token Plan quota flow
+
+The CLI's `usage summary` delegates to [TokenPlanService](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/services/tokenplan-service.ts). It calls BSS `QuerySubscriptionGray`, then uses the seat summary and addons for migrated accounts, or `DescribeFrInstances` for legacy team, personal and addon commodities. The personal legacy commodity is `sfm_tokenplanpersonal_dp_intl`.
+
+The console's personal `/tokenplan/personal/api/v2/usage` gateway route is not used by the inspected CLI. Experimental probes returned an empty `ret` tuple, not a recognized success. They established neither a quota nor OAuth permission for personal console operations, and are excluded from the CLI-aligned flow. Failed or unrecognized BSS responses remain inconclusive instead of being converted to zero balance or no subscription.
