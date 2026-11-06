@@ -4,6 +4,25 @@ The package is an Effect-native OpenCode 2.2.5 plugin. It follows the official Q
 
 ## Components
 
+```mermaid
+flowchart TD
+    Host[OpenCode] --> Plugin[Plugin registration and hooks]
+    Credentials[(Native credential storage)] -. Management OAuth .-> Management[Discovery and quota]
+    Credentials -. Separate inference key .-> Driver[Native Token Plan driver]
+    Plugin --> Management
+    Management --> API[QwenCloud management API]
+    Management --> Cache[(Account-scoped catalog cache)]
+    Cache --> Inventory[Published model inventory]
+    Inventory -. Active catalog guard .-> Driver
+    Plugin --> Driver
+    Driver --> Validation[Final request validation]
+    Validation --> Endpoint[Fixed Token Plan endpoint]
+    Endpoint --> Stream[SSE response]
+    Stream --> Host
+    Lifetime[Scope-owned deadline and cancellation] -.-> Driver
+    Lifetime -.-> Stream
+```
+
 - `src/index.ts`: native integrations, provider registration, RPC methods and account/catalog hooks.
 - `src/oauth.ts`, `src/catalog.ts`: device authorization with PKCE, bounded management responses and model metadata validation.
 - `src/discovery.ts`, `src/inventory.ts`: account-scoped catalog cache, invalidation and native model definitions.
@@ -29,6 +48,23 @@ The optional quota adapter has a third, independent bearer key. It discovers Ope
 `timeoutMs` is the only plugin option: 1,000–600,000 milliseconds, default 120,000. A separate internal `qwencloudTimeoutMs` survives the host's removal of native transport settings before provider-module construction.
 
 ## Quota boundaries
+
+```mermaid
+sequenceDiagram
+    participant Consumer as Quota consumer
+    participant Adapter as Optional loopback adapter
+    participant RPC as Native quota RPC
+    participant BSS as QwenCloud BSS
+    Consumer->>Adapter: GET /quota with independent bearer key
+    Adapter->>Adapter: Authenticate and validate request
+    Adapter->>RPC: Query quota for explicit project location
+    RPC->>BSS: QuerySubscriptionGray with management OAuth
+    BSS-->>RPC: Routing observation
+    RPC->>BSS: Read seat or legacy quota scopes
+    BSS-->>RPC: Available values and failures
+    RPC-->>Adapter: Quota observations with diagnostics
+    Adapter-->>Consumer: Bounded quota-v1 response
+```
 
 BSS routing follows `QuerySubscriptionGray`: seat summary/addon or legacy personal/team/addon reads. Credits remain distinct from raw tokens, spending limits and Junie credits. Missing values, failures and partial results must not become zero or “not subscribed.” Team aggregate balances are not individual allocations; expiration is not a reset. Details and bounds are in [quota semantics](docs/quota.md).
 
