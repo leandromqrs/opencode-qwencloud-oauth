@@ -35,7 +35,8 @@ export interface QwenCloudQuota {
   diagnostics: QwenCloudQuotaDiagnostic[]
 }
 
-const amountSchema = { type: "string", pattern: "^\\d+(?:\\.\\d+)?$", maxLength: 96 } as const
+// Native RPC imports reject patterns; readQwenCloudQuota enforces exact lexical rules.
+const amountSchema = { type: "string", minLength: 1, maxLength: 96 } as const
 const timeSchema = { type: "string", format: "date-time", maxLength: 32 } as const
 export const qwenCloudQuotaSchema = {
   type: "object", additionalProperties: false,
@@ -46,7 +47,7 @@ export const qwenCloudQuotaSchema = {
       type: "object", additionalProperties: false,
       required: ["id", "kind", "scope", "status", "unit", "action"],
       properties: {
-        id: { type: "string", pattern: "^(personal|team|addon)-[1-9][0-9]{0,2}$" },
+        id: { type: "string", minLength: 6, maxLength: 12 },
         kind: { enum: kinds }, scope: { enum: scopes }, status: { enum: statuses }, unit: { const: "Credits" },
         action: { enum: ["GetSeatSubscriptionSummary", "DescribeFrInstances"] },
         total: amountSchema, remaining: amountSchema, resetAt: timeSchema,

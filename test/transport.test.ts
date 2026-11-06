@@ -1,9 +1,17 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { API_BASE, assertHostTransportSafe, inferenceBase, prepareRequest } from "../src/transport.js"
+import { API_BASE, inferenceBase, isInferenceKey, prepareRequest } from "../src/transport.js"
 
-test("production transport blocks before credential resolution", () => {
-  assert.throws(() => assertHostTransportSafe(), /OpenCode.*redirect.*signal/)
+test("opaque API keys permit printable punctuation but reject header injection and excessive length", async () => {
+  const key = "sk-sp-fixture.part+/=:opaque"
+  const secured = await prepareRequest(new Request(`${API_BASE}/chat/completions`, { method: "POST", body: JSON.stringify({ model: "fixture" }) }), key, ["fixture"], { plan: "token-plan" })
+  assert.equal(secured.headers.get("authorization"), `Bearer ${key}`)
+  for (const value of ["sk-sp-foo\r\nInjected: yes", "sk-sp-foo bar", "sk-sp-\u0000", "sk-" + "a".repeat(32766), undefined]) assert.equal(isInferenceKey(value), false)
+})
+
+test("explicit inference plan pins the same service endpoints as the official CLI", () => {
+  assert.equal(inferenceBase({ plan: "token-plan" }), "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")
+  assert.equal(inferenceBase({ plan: "payg", region: "ap-southeast-1" }), "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
 })
 
 test("isolated API-key transport pins plan and preserves chat payload without invented variants", async () => {
@@ -20,4 +28,8 @@ test("management tokens and cross-plan fallback are rejected", async () => {
   for (const key of ["management-access", "sk-ws-fixture"]) await assert.rejects(prepareRequest(new Request(`${API_BASE}/chat/completions`, { method: "POST", body: "{}" }), key, [], { plan: "token-plan" }), /API key/)
   const payg = inferenceBase({ plan: "payg", region: "ap-southeast-1" })
   await assert.rejects(prepareRequest(new Request(`${payg}/chat/completions`, { method: "POST", body: "{}" }), "sk-sp-fixture", [], { plan: "payg", region: "ap-southeast-1" }), /API key/)
+})
+
+test("missing inference key directs manual creation without resolving OAuth or attempting fallback", async () => {
+  await assert.rejects(prepareRequest(new Request(`${API_BASE}/chat/completions`, { method: "POST", body: "{}" }), "", [], { plan: "token-plan" }), /https:\/\/home\.qwencloud\.com\/api-keys/)
 })

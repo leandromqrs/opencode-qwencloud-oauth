@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
+import { Schema, SchemaRepresentation } from "effect"
+import { catalogRPC } from "../src/discovery.js"
 import { getQwenCloudQuota, readQwenCloudQuota, toQwenCloudQuotaV1 } from "../src/quota.js"
 
 const token = "synthetic-oauth-token"
@@ -15,11 +17,15 @@ function legacy(overrides: Partial<Record<string, unknown>> = {}): typeof fetch 
     const body = JSON.parse(init?.body as string)
     assert.equal(body.product, "BssOpenAPI-V3")
     assert.equal(body.region, "ap-southeast-1")
-    if (body.action === "QuerySubscriptionGray") return wrap({ IsGray: false })
+    if (body.action === "QuerySubscriptionGray") {
+      assert.deepEqual(body.params, {})
+      return wrap({ IsGray: false })
+    }
     assert.equal(body.action, "DescribeFrInstances")
     assert.equal(body.params.Group, "tokenPlan")
     assert.equal(body.params.PageNum, "1")
     const code = body.params.CommodityCode as string
+    assert.ok(["sfm_tokenplanteams_dp_intl", "sfm_tokenplanpersonal_dp_intl", "sfm_tokenplanteamsaddon_dp_intl"].includes(code))
     assert.equal(body.params.PageSize, code.includes("addon") ? "100" : "10")
     return wrap(overrides[code] ?? { Data: code.includes("personal") ? [instance] : [], TotalCount: code.includes("personal") ? 1 : 0 })
   }
@@ -47,9 +53,14 @@ test("legacy preserves exact Credits, explicit period zero, scope and no expirat
   assert.equal(numericZero.balances[0].remaining, "0")
 })
 
-test("seat route reads aggregate groups and addons separately with millisecond reset", async () => {
-  const result = await getQwenCloudQuota(token, async (_input, init) => {
+test("CLI gray route reads only BSS team summary and addon, never console usage or keys", async () => {
+  const calls: string[] = []
+  const result = await getQwenCloudQuota(token, async (input, init) => {
+    assert.equal(input, "https://cli.qwencloud.com/data/v2/api.json")
     const body = JSON.parse(init?.body as string)
+    calls.push(body.action)
+    assert.equal(body.product, "BssOpenAPI-V3")
+    assert.equal(body.region, "ap-southeast-1")
     if (body.action === "QuerySubscriptionGray") return wrap({ IsGray: true })
     if (body.action === "GetSeatSubscriptionSummary") {
       assert.deepEqual(body.params, { productCode: "sfm_tokenplanteams_dp_intl" })
@@ -58,9 +69,11 @@ test("seat route reads aggregate groups and addons separately with millisecond r
         { TotalValue: "10", SurplusValue: "0", NextCycleFlushTime: "2030-03-17T17:46:40Z" },
       ] } })
     }
-    assert.equal(body.params.CommodityCode, "sfm_tokenplanteamsaddon_dp_intl")
+    assert.equal(body.action, "DescribeFrInstances")
+    assert.deepEqual(body.params, { Group: "tokenPlan", CommodityCode: "sfm_tokenplanteamsaddon_dp_intl", PageNum: "1", PageSize: "100" })
     return wrap({ Data: [{ ...instance, CurrCapacityBaseValue: "3" }] })
   })
+  assert.equal(calls.length, 3)
   assert.equal(result.state, "ready")
   assert.equal(result.balances[0].scope, "team-aggregate")
   assert.equal(result.balances[0].remaining, "25.5")
@@ -68,6 +81,41 @@ test("seat route reads aggregate groups and addons separately with millisecond r
   assert.equal(result.balances[2].kind, "addon")
   assert.equal(result.balances[2].scope, "unknown")
   assert.ok(toQwenCloudQuotaV1(result).entries.some(row => row.kind === "percent" && row.percentRemaining === 25.5))
+})
+
+test("empty or malformed seat summaries remain inconclusive errors with sanitized diagnostics", async () => {
+  for (const payload of [{ Success: true, Data: {} }, {}, null, { Data: { SubscriptionGroupList: null, Uid: token } }]) {
+    const result = await getQwenCloudQuota(token, async (_input, init) => {
+      const { action } = JSON.parse(init?.body as string)
+      return wrap(action === "QuerySubscriptionGray" ? { IsGray: true } : action === "DescribeFrInstances" ? { Data: [] } : payload)
+    })
+    assert.equal(result.state, "error")
+    assert.deepEqual(result.balances, [])
+    assert.deepEqual(result.diagnostics, [{ action: "GetSeatSubscriptionSummary", code: "invalid-response" }])
+    assert.deepEqual(readQwenCloudQuota(result), result)
+    assert.ok(!JSON.stringify(result).includes(token))
+  }
+})
+
+test("native quota schema compiles without regex and strict reader retains lexical rules", async () => {
+  const schema = SchemaRepresentation.fromJsonSchemaDocument({ dialect: "draft-2020-12", schema: catalogRPC.methods.quota.output, definitions: {} })
+  const decode = Schema.decodeUnknownSync(schema as Schema.Codec<unknown>)
+  const ready = await getQwenCloudQuota(token, legacy())
+  const team = { ...ready, balances: [{ ...ready.balances[0], id: "team-1", kind: "team", scope: "team-aggregate", action: "GetSeatSubscriptionSummary", resetAt: "2030-01-01T00:00:00.000Z" }] }
+  for (const quota of [await getQwenCloudQuota(), ready, team]) {
+    assert.deepEqual(decode(quota), quota)
+    assert.deepEqual(readQwenCloudQuota(quota), quota)
+  }
+  for (const quota of [{ ...ready, source: "other" }, { ...ready, balances: Array(33).fill(ready.balances[0]) }, { ...ready, balances: [{ ...ready.balances[0], total: "1".repeat(97) }] }]) assert.throws(() => decode(quota))
+  for (const balance of [
+    { ...ready.balances[0], id: "personal-0" }, { ...ready.balances[0], id: "team-1" },
+    ...["-1", "1e3", "NaN", "1.2.3"].map(total => ({ ...ready.balances[0], total })),
+    { ...ready.balances[0], resetAt: "2030-02-30T00:00:00.000Z" }, { ...ready.balances[0], secret: "unexpected" },
+    { ...ready.balances[0], unit: "Percent", action: "PersonalTokenPlanUsage", period: "weekly" },
+  ]) assert.throws(() => readQwenCloudQuota({ ...ready, balances: [balance] }))
+  assert.throws(() => readQwenCloudQuota({ ...ready, observedAt: "2030-02-30T00:00:00.000Z" }))
+  assert.throws(() => readQwenCloudQuota({ ...ready, balances: [ready.balances[0], ready.balances[0]] }))
+  for (const extra of [{ shape: [] }, { stage: "outer" }, { retKind: "empty" }]) assert.throws(() => readQwenCloudQuota({ ...ready, state: "partial", diagnostics: [{ action: "DescribeFrInstances", code: "invalid-response", ...extra }] }))
 })
 
 test("missing data is unknown, never zero or not subscribed", async () => {
@@ -101,7 +149,7 @@ test("routing failure is an error, not a legacy fallback", async () => {
   assert.equal(result.state, "error")
 })
 
-test("malformed amounts, reset values and inconsistent allocations do not generate percentages", async () => {
+test("malformed amounts and inconsistent allocations do not generate percentages", async () => {
   const result = await getQwenCloudQuota(token, legacy({ sfm_tokenplanpersonal_dp_intl: { Data: [
     { ...instance, InitCapacityBaseValue: "1", CurrCapacityBaseValue: "2" },
     { ...instance, InitCapacityBaseValue: "NaN", CurrCapacityBaseValue: "-1" },

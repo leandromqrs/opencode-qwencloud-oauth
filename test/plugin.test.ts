@@ -2,16 +2,16 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import plugin, { parseOptions } from "../src/index.js"
 import { type Plugin } from "@opencode/plugin/effect"
-import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
+import type { IntegrationMethodRegistration, IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
 import { Effect, Exit, Scope, Stream } from "effect"
-import { memoryStorage } from "./discovery-support.js"
+import { fixtureContext, memoryStorage } from "./discovery-support.js"
 
 test("configuration cannot enable an inference bypass or fabricate models", () => {
   assert.deepEqual(parseOptions({}), { timeoutMs: 120_000 })
   for (const options of [{ unsafe: true }, { models: ["invented"] }, { baseURL: "https://evil.test" }, { timeoutMs: 0 }]) assert.throws(() => parseOptions(options))
 })
 
-test("native plugin registers OAuth/RPC without startup HTTP; inference blocks before credential resolution", async () => {
+test("native plugin registers separate key auth and secured driver without startup HTTP or credential resolution", async () => {
   let auth: IntegrationOAuthMethodRegistration | undefined
   let inventory: any
   let resolves = 0
@@ -20,6 +20,9 @@ test("native plugin registers OAuth/RPC without startup HTTP; inference blocks b
   const hooks = new Map<string, (event: any) => Effect.Effect<void>>()
   const registration = { dispose: Effect.void, events: { emit: () => Effect.void } }
   const integration = { id: "qwencloud-oauth", name: "" }
+  const keyIntegration = { id: "qwencloud-api-key", name: "" }
+  const methods: IntegrationMethodRegistration[] = []
+  let keyConnected = false
   const original = globalThis.fetch
   globalThis.fetch = async () => { requests++; throw new Error("network forbidden") }
   const storage = memoryStorage()
@@ -27,8 +30,8 @@ test("native plugin registers OAuth/RPC without startup HTTP; inference blocks b
     options: {}, storage: storage.storage, event: { subscribe: () => Stream.empty },
     provider: { transform: (fn: any) => Effect.sync(() => { fn({ add: (value: unknown) => { inventory = value } }); return registration }), reload: () => Effect.void },
     integration: {
-      transform: (fn: any) => Effect.sync(() => { fn({ method: { update: (value: typeof auth) => { auth = value } }, update: (_id: string, cb: (value: typeof integration) => void) => cb(integration) }); return registration }),
-      connection: { active: () => Effect.succeed({ type: "credential", id: "fixture", method: "oauth", label: "PRIVATE" }), resolve: () => Effect.sync(() => { resolves++; throw new Error("must not resolve") }) },
+      transform: (fn: any) => Effect.sync(() => { fn({ method: { update: (value: IntegrationMethodRegistration) => { methods.push(value); if (value.method.type === "oauth") auth = value as IntegrationOAuthMethodRegistration } }, update: (id: string, cb: (value: typeof integration) => void) => cb(id === integration.id ? integration : keyIntegration) }); return registration }),
+      connection: { active: (id: string) => Effect.sync(() => id === "qwencloud-api-key" ? keyConnected ? { type: "credential", id: "private-key-id", method: "key", label: "PRIVATE-KEY-LABEL" } : undefined : { type: "credential", id: "fixture", method: "oauth", label: "PRIVATE" }), resolve: () => Effect.sync(() => { resolves++; throw new Error("must not resolve") }) },
     },
     rpc: { register: (definition: any, implementations: typeof handlers) => Effect.sync(() => { assert.equal(definition.id, "qwencloud"); Object.assign(handlers, implementations); return registration }) },
     session: { hook: (name: string, callback: any, scope: any) => Effect.sync(() => { assert.equal(scope.providerID, "qwencloud"); hooks.set(name, callback); return registration }) },
@@ -37,14 +40,29 @@ test("native plugin registers OAuth/RPC without startup HTTP; inference blocks b
   try {
     await Effect.runPromise(plugin.effect(ctx as unknown as Plugin.Context).pipe(Scope.provide(scope)))
     assert.equal(plugin.id, "opencode-qwencloud-oauth")
-    assert.equal(inventory.info.package, "@opencode/ai/providers/openai-compatible")
+    assert.equal(inventory.info.package, new URL("../src/driver.js", import.meta.url).href)
+    assert.equal(inventory.info.settings.apiKey, undefined)
+    assert.equal(inventory.sourceConnection, undefined)
     assert.deepEqual(inventory.models, [])
     assert.equal(integration.name, "QwenCloud")
+    assert.equal(inventory.info.integrationID, "qwencloud-api-key")
+    assert.equal(keyIntegration.name, "QwenCloud API key")
+    assert.deepEqual(methods.map(value => [value.integrationID, value.method.type]), [["qwencloud-oauth", "oauth"], ["qwencloud-api-key", "key"]])
+    assert.equal("authorize" in methods[1], false)
     assert.equal(auth?.integrationID, "qwencloud-oauth")
     assert.equal(auth?.method.id, "device")
     assert.equal(auth?.method.label, "Sign in with QwenCloud")
     assert.deepEqual(Object.keys(handlers).sort(), ["catalog", "quota", "refresh", "status"])
-    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({})), /host correction/)
+    assert.equal((await Effect.runPromise(handlers.status())).keyProvisioning, "manual-key-required")
+    assert.deepEqual((await Effect.runPromise(handlers.status())).inferenceKey, { integrationID: "qwencloud-api-key", state: "not-connected", accountBinding: "unverified" })
+    keyConnected = true
+    const withKey = await Effect.runPromise(handlers.status())
+    assert.deepEqual(withKey.inferenceKey, { integrationID: "qwencloud-api-key", state: "stored-unverified", accountBinding: "unverified" })
+    assert.equal(withKey.inference, "configured-unverified")
+    assert.doesNotMatch(JSON.stringify(withKey), /private-key-id|PRIVATE-KEY-LABEL/)
+    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "invented" } })), /active management catalog/)
+    keyConnected = false
+    assert.equal((await Effect.runPromise(handlers.status())).inferenceKey.state, "not-connected")
     assert.equal(resolves, 0)
     assert.equal(requests, 0)
     assert.deepEqual([...storage.values.keys()], ["device-client-id:v1"])
@@ -56,6 +74,68 @@ test("native plugin registers OAuth/RPC without startup HTTP; inference blocks b
   } finally { await Effect.runPromise(Scope.close(scope, Exit.void)); globalThis.fetch = original }
 })
 
+test("native provider fences its source to the inference key while the HTTP hook checks management catalog provenance", { timeout: 5000 }, async () => {
+  const fixture = fixtureContext()
+  const registration = { dispose: Effect.void, events: { emit: () => Effect.void } }
+  let keyConnection = { type: "credential", id: "fixture-key", method: "key", label: "PRIVATE" }
+  let emit!: (event: unknown) => void
+  const event = new Promise<unknown>(resolve => { emit = resolve })
+  let sourceReloaded!: () => void
+  const keyReloaded = new Promise<void>(resolve => { sourceReloaded = resolve })
+  let transform!: (editor: any) => void
+  let inventory: any
+  let reloads = 0
+  const handlers: Record<string, () => Effect.Effect<any>> = {}
+  const hooks = new Map<string, (event: any) => Effect.Effect<void>>()
+  const apply = () => transform({ add: (record: unknown) => { inventory = record } })
+  const ctx = {
+    ...fixture.ctx, options: { timeoutMs: 2345 }, event: { subscribe: () => Stream.fromAsyncIterable({ async *[Symbol.asyncIterator]() { yield await event } }, error => error) },
+    integration: { ...fixture.ctx.integration,
+      connection: { ...fixture.ctx.integration.connection, active: (id: string) => id === "qwencloud-api-key" ? Effect.succeed(keyConnection) : fixture.ctx.integration.connection.active(id) },
+      transform: () => Effect.succeed(registration),
+    },
+    provider: { transform: (fn: typeof transform) => Effect.sync(() => { transform = fn; apply(); return registration }), reload: () => Effect.sync(() => { reloads++; apply(); if (inventory.sourceConnection?.id === "other-key") sourceReloaded() }) },
+    rpc: { register: (_definition: unknown, implementations: typeof handlers) => Effect.sync(() => { Object.assign(handlers, implementations); return registration }) },
+    session: { hook: (name: string, callback: any) => Effect.sync(() => { hooks.set(name, callback); return registration }) },
+  }
+  const original = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = async (input, init) => {
+    calls++
+    assert.equal(input, "https://cli.qwencloud.com/data/v2/api.json")
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-access")
+    return Response.json({ code: "200", data: { Data: [{ Items: [{ Model: "qwen3.8-max" }] }] } })
+  }
+  const scope = await Effect.runPromise(Scope.make())
+  try {
+    await Effect.runPromise(plugin.effect(ctx as unknown as Plugin.Context).pipe(Scope.provide(scope)))
+    assert.equal(fixture.resolves(), 0)
+    assert.equal(inventory.sourceConnection.id, "fixture-key")
+    await Effect.runPromise(handlers.refresh())
+    assert.equal(calls, 1)
+    assert.equal(fixture.resolves(), 1)
+    assert.equal(inventory.models.length, 1)
+    assert.equal(inventory.models[0].package, inventory.info.package)
+    assert.equal(inventory.info.settings.qwencloudTimeoutMs, 2345)
+    assert.equal(inventory.sourceConnection.method, "key")
+    assert.notEqual(inventory.sourceConnection.id, "fixture-account")
+    await Effect.runPromise(hooks.get("http.request")!({ model: { id: "qwen3.8-max" } }))
+    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "invented" } })), /active management catalog/)
+    keyConnection = { ...keyConnection, id: "other-key" }
+    emit({ type: "credential.switched", data: { integrationID: "qwencloud-api-key" } })
+    await keyReloaded
+    assert.equal(inventory.sourceConnection.id, "other-key")
+    assert.equal(inventory.models.length, 1)
+    assert.equal((await Effect.runPromise(handlers.status())).inferenceKey.accountBinding, "unverified")
+    fixture.setConnection({ type: "credential", id: "other-account" as never, method: "oauth", label: "PRIVATE" })
+    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "qwen3.8-max" } })), /active management catalog/)
+    assert.equal(inventory.models.length, 0)
+    assert.ok(reloads >= 2)
+    assert.equal(fixture.resolves(), 1)
+    assert.equal(calls, 1)
+  } finally { await Effect.runPromise(Scope.close(scope, Exit.void)); globalThis.fetch = original }
+})
+
 test("native authorization scope disposal cancels an in-flight token poll", async () => {
   let auth!: IntegrationOAuthMethodRegistration
   const registration = { dispose: Effect.void, events: { emit: () => Effect.void } }
@@ -63,7 +143,7 @@ test("native authorization scope disposal cancels an in-flight token poll", asyn
     options: {}, storage: memoryStorage().storage, event: { subscribe: () => Stream.empty },
     provider: { transform: () => Effect.succeed(registration), reload: () => Effect.void },
     rpc: { register: () => Effect.succeed(registration) }, session: { hook: () => Effect.succeed(registration) },
-    integration: { connection: { active: () => Effect.succeed(undefined) }, transform: (fn: any) => Effect.sync(() => { fn({ method: { update: (value: typeof auth) => { auth = value } }, update: () => {} }); return registration }) },
+    integration: { connection: { active: () => Effect.succeed(undefined) }, transform: (fn: any) => Effect.sync(() => { fn({ method: { update: (value: IntegrationMethodRegistration) => { if (value.method.type === "oauth") auth = value as IntegrationOAuthMethodRegistration } }, update: () => {} }); return registration }) },
   }
   let started!: () => void
   const polling = new Promise<void>(resolve => { started = resolve })
@@ -80,6 +160,8 @@ test("native authorization scope disposal cancels an in-flight token poll", asyn
     await Effect.runPromise(plugin.effect(ctx as unknown as Plugin.Context).pipe(Scope.provide(pluginScope)))
     const authorization = await Effect.runPromise(auth.authorize({} as never).pipe(Scope.provide(authScope)))
     assert.equal(authorization.mode, "auto")
+    assert.match(authorization.instructions, /https:\/\/home\.qwencloud\.com\/api-keys/)
+    assert.doesNotMatch(authorization.instructions, /not established/)
     if (authorization.mode !== "auto") throw new Error("Expected native auto authorization")
     const result = Effect.runPromise(authorization.callback)
     void result.catch(() => {})

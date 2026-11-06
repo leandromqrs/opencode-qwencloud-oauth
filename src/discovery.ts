@@ -4,7 +4,7 @@ import { createHash } from "node:crypto"
 import { CatalogError, discoverCatalog, sanitizeSavedModels, MANAGEMENT_ORIGIN, type Catalog } from "./catalog.js"
 import { METADATA_SOURCE, reconcileCatalog, type AccountModel } from "./inventory.js"
 import { AUTH_ORIGIN, object, type Fetch } from "./oauth.js"
-import { API_BASE, HOST_TRANSPORT_BLOCKER } from "./transport.js"
+import { API_BASE, KEY_INTEGRATION_ID } from "./transport.js"
 import { getQwenCloudQuota, qwenCloudQuotaSchema } from "./quota.js"
 
 export const CATALOG_CHANGED_EVENT = "rpc.qwencloud.catalogUpdated"
@@ -37,6 +37,7 @@ function snapshot(connection: ActiveConnection, value: Snapshot) {
   return { version: VERSION, routing: ROUTING, metadataSource: METADATA_SOURCE, connectionID: connection.type === "credential" ? connection.id : undefined, catalog: value.catalog }
 }
 
+/** Account-bound metadata and explicit management reads; published models do not establish inference entitlement. */
 export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountModel[], connection: ActiveConnection) => Effect.Effect<void>, notify: (data: CatalogNotification) => Effect.Effect<void> = () => Effect.void, dependencies: { fetch?: Fetch } = {}) {
   let cached: { connection: ActiveConnection; snapshot: Snapshot; models: AccountModel[] } | undefined
   let refreshing = false
@@ -74,12 +75,34 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
   })
   const status = Effect.gen(function* () {
     const connection = yield* current
+    const keyConnection = yield* ctx.integration.connection.active(KEY_INTEGRATION_ID)
+    const keyStored = keyConnection?.type === "credential" && keyConnection.method === "key"
     const ageMs = cached ? Math.max(0, Date.now() - cached.snapshot.catalog.fetchedAt) : null
-    return { connected: !!connectionKey(connection), refreshing, refreshedAt: cached?.snapshot.catalog.fetchedAt ?? null, supportedModels: cached?.models.length ?? 0, storage: storageState, freshness: ageMs === null ? "missing" : ageMs > STALE_AFTER_MS ? "stale" : "fresh", ageMs, inference: "blocked", inferenceReason: HOST_TRANSPORT_BLOCKER, keyProvisioning: "unavailable-contract" }
+    return {
+      connected: !!connectionKey(connection), refreshing,
+      refreshedAt: cached?.snapshot.catalog.fetchedAt ?? null,
+      supportedModels: cached?.models.length ?? 0,
+      storage: storageState,
+      freshness: ageMs === null ? "missing" : ageMs > STALE_AFTER_MS ? "stale" : "fresh", ageMs,
+      inference: keyStored ? "configured-unverified" : "key-required",
+      keyProvisioning: "manual-key-required",
+      inferenceKey: {
+        integrationID: KEY_INTEGRATION_ID,
+        state: keyStored ? "stored-unverified" : "not-connected",
+        accountBinding: "unverified",
+      },
+    }
   })
   const catalog = Effect.gen(function* () {
-    yield* current
-    return { metadataSource: METADATA_SOURCE, limitSource: "QwenCloud management catalog ModelInfo; missing limits unknown (native zero sentinel).", capabilitySource: "QwenCloud InferenceMetadata modalities; tool support and reasoning variants unknown.", pricing: "unknown", entitlement: "unverified", accountListed: cached?.snapshot.catalog ?? null, supported: cached?.models ?? [], inference: "blocked" }
+    const { inference } = yield* status
+    return {
+      metadataSource: METADATA_SOURCE,
+      limitSource: "QwenCloud management catalog ModelInfo; missing limits unknown (native zero sentinel).",
+      capabilitySource: "QwenCloud InferenceMetadata modalities; tool support and reasoning variants unknown.",
+      pricing: "unknown", entitlement: "unverified",
+      accountListed: cached?.snapshot.catalog ?? null,
+      supported: cached?.models ?? [], inference,
+    }
   })
   const invalidate = (connection: ActiveConnection) => Effect.gen(function* () {
     const hash = accountHash(connection)

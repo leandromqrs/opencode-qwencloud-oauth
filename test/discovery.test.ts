@@ -1,10 +1,39 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { Effect } from "effect"
-import { CATALOG_CHANGED_EVENT, createDiscovery } from "../src/discovery.js"
+import { CATALOG_CHANGED_EVENT, createDiscovery, type ActiveConnection } from "../src/discovery.js"
 import { fixtureContext, memoryStorage } from "./discovery-support.js"
 
 const listing = (...ids: string[]) => ({ code: "200", data: { Data: [{ Items: ids.map(Model => ({ Model })) }] } })
+
+test("separate native key metadata never binds an OAuth catalog to the key owner", async () => {
+  const fixture = fixtureContext()
+  const managementActive = fixture.ctx.integration.connection.active
+  let keyConnection: ActiveConnection | undefined = { type: "credential", id: "private-key-id" as never, method: "key", label: "PRIVATE-KEY-LABEL" }
+  const ctx = { ...fixture.ctx, integration: { ...fixture.ctx.integration, connection: {
+    ...fixture.ctx.integration.connection,
+    active: (id: string) => id === "qwencloud-api-key" ? Effect.sync(() => keyConnection) : managementActive(id),
+  } } }
+  let calls = 0
+  const discovery = createDiscovery(ctx, () => Effect.void, undefined, { fetch: async () => { calls++; return Response.json(listing("management-account-model")) } })
+  await Effect.runPromise(discovery.refresh)
+  const status = await Effect.runPromise(discovery.status)
+  assert.equal(status.inferenceKey.state, "stored-unverified")
+  assert.equal(status.inferenceKey.accountBinding, "unverified")
+  assert.equal(status.inference, "configured-unverified")
+  assert.equal(fixture.resolves(), 1)
+  keyConnection = { type: "credential", id: "another-private-key-id" as never, method: "key", label: "OTHER-PRIVATE" }
+  await Effect.runPromise(discovery.handleEvent({ type: "credential.switched", data: { integrationID: "qwencloud-api-key" } }))
+  assert.equal((await Effect.runPromise(discovery.catalog)).supported.length, 1)
+  fixture.setConnection({ type: "credential", id: "other-management-account" as never, method: "oauth", label: "OTHER-PRIVATE" })
+  assert.equal((await Effect.runPromise(discovery.catalog)).supported.length, 0)
+  assert.equal((await Effect.runPromise(discovery.status)).inferenceKey.accountBinding, "unverified")
+  keyConnection = undefined
+  assert.equal((await Effect.runPromise(discovery.status)).inferenceKey.state, "not-connected")
+  assert.equal(calls, 1)
+  assert.equal(fixture.resolves(), 1)
+  assert.doesNotMatch(JSON.stringify(status), /private-key-id|PRIVATE-KEY-LABEL|fixture-access/)
+})
 
 test("startup and status do not resolve credentials or issue HTTP; metadata survives location reload", async () => {
   const storage = memoryStorage()

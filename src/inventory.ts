@@ -12,7 +12,7 @@ export function reconcileCatalog(catalog: Catalog): AccountModel[] {
 export function nativeModel(model: AccountModel): Model.Info {
   return {
     ...Model.Info.default(Provider.ID.make("qwencloud"), Model.ID.make(model.id)),
-    package: "@opencode/ai/providers/openai-compatible",
+    package: new URL("./driver.js", import.meta.url).href,
     settings: { baseURL: API_BASE },
     capabilities: { tools: false, input: model.inputModalities ?? [], output: model.outputModalities ?? [] },
     limit: { context: model.context ?? 0, output: model.output ?? 0 }, cost: [], variants: [],
