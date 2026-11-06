@@ -61,7 +61,7 @@ opencode api post '/api/rpc/qwen-code/quota?location[directory]=/absolute/path/t
 
 Refresh performs authenticated metadata requests, not inference. It publishes only returned IDs under `qwen-code/<model-id>`. Startup and 15-second cross-location synchronization restore local metadata without resolving credentials or making upstream requests. Refresh metadata explicitly when needed; freshness becomes stale after 24 hours.
 
-The final local validation passed **40 tests**, strict TypeScript checking, the production build, and launcher syntax checks. Real login and account discovery are not yet validated for this project. Do not interpret mocked driver tests or protocol research as verified inference.
+The latest local validation passed **43 tests**, strict TypeScript checking and the production build. Launcher syntax checks also passed. Real login and account discovery are not yet validated for this project. Do not interpret mocked driver tests or protocol research as verified inference.
 
 ## Authentication and discovery contract
 

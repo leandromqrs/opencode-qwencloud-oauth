@@ -1,6 +1,6 @@
 import { Integration, Plugin, Provider } from "@opencode/plugin/effect"
 import { Effect, Stream } from "effect"
-import { beginLogin, METHOD_ID, singleFlightRefresh, type Login } from "./oauth.js"
+import { authorizationStartError, beginLogin, METHOD_ID, singleFlightRefresh, type Login } from "./oauth.js"
 import { CATALOG_CHANGED_EVENT, catalogRPC, createDiscovery, type ActiveConnection, type CatalogNotification } from "./discovery.js"
 import { nativeModel, type AccountModel } from "./inventory.js"
 import { API_BASE, assertHostTransportSafe } from "./transport.js"
@@ -50,7 +50,7 @@ export default Plugin.define({
         method: { id: METHOD_ID, type: "oauth", label: "Sign in with Qwen Plus / Pro" },
         authorize: () => Effect.gen(function* () {
           const login = yield* Effect.acquireRelease(
-            Effect.tryPromise({ try: signal => beginLogin({ signal }), catch: () => new Error("Qwen device authorization could not start; retry later.") }).pipe(Effect.tap(login => Effect.sync(() => { logins.add(login) }))),
+            Effect.tryPromise({ try: signal => beginLogin({ signal }), catch: authorizationStartError }).pipe(Effect.tap(login => Effect.sync(() => { logins.add(login) }))),
             login => Effect.sync(() => { logins.delete(login); login.cancel() }),
           )
           return { mode: "auto" as const, url: login.url, expiresAt: login.expiresAt,

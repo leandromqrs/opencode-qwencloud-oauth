@@ -24,7 +24,7 @@ Fixed auth origin: `https://auth.qwen.ai`. Public client ID: `qwen-code-cli`. Sc
 
 POST bodies use form encoding. Device polling honors the returned interval and original expiry, `authorization_pending`, `slow_down`, cancellation, and bounded backoff. Tokens require a nonempty access token and refresh token, `Bearer` token type, scope, and a positive expiry. Refresh rotates the complete token pair.
 
-Browser authorization uses the Qwen web origin and `/authorize`. Its `client=qwen-code` parameter is distinct from the OAuth public client ID. Do not construct a fake success URL or treat website login as account activation.
+Browser authorization uses the server-returned verification URLs on the Qwen web origin. The design document's `/authorize` path and `client=qwen-code` parameter are illustrative, not required response fields: the official client validates both fields as URLs and returns them unchanged. A live device request returned same-origin verification URLs with a different path and no `client` parameter. The plugin preserves the supplied URL, requires matching base/complete paths and user codes, and rejects foreign origins, userinfo, fragments and unexpected or duplicate query parameters. Do not construct a fake success URL or treat website login as account activation.
 
 The legacy `qwen-oauth` flow is different: it uses old endpoints, PKCE, and optional resource routing. Its source presence does not make the discontinued free service a supported target.
 

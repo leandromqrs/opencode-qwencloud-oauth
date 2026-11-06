@@ -1,14 +1,53 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { beginLogin, CLIENT_ID, METHOD_ID, singleFlightRefresh, validateVerificationURL } from "../src/oauth.js"
+import { authorizationStartError, beginLogin, CLIENT_ID, METHOD_ID, OAuthError, singleFlightRefresh, validateVerificationURL } from "../src/oauth.js"
 
 const tokens = { access_token: "fixture-access", refresh_token: "fixture-refresh", token_type: "Bearer", expires_in: 3600, scope: "model:invoke profile:read" }
 const device = { device_code: "private-device", user_code: "ABCD", verification_uri: "https://chat.qwen.ai/authorize", verification_uri_complete: "https://chat.qwen.ai/authorize?user_code=ABCD&client=qwen-code", expires_in: 120, interval: 5 }
 
 test("verification browser URL is strictly scoped", () => {
   assert.equal(validateVerificationURL(device.verification_uri_complete, "ABCD"), device.verification_uri_complete)
-  for (const url of ["http://chat.qwen.ai/authorize", "https://chat.qwen.ai.evil/authorize", "https://user@chat.qwen.ai/authorize", "https://chat.qwen.ai/other", "https://chat.qwen.ai/authorize?user_code=OTHER&client=qwen-code", device.verification_uri_complete + "&redirect_uri=https://evil.test"]) {
+  for (const url of ["http://chat.qwen.ai/authorize", "https://chat.qwen.ai.evil/authorize", "https://user@chat.qwen.ai/authorize", "https://chat.qwen.ai/authorize#fragment", "https://chat.qwen.ai/authorize?user_code=OTHER&client=qwen-code", device.verification_uri_complete + "&redirect_uri=https://evil.test", device.verification_uri_complete + "&user_code=ABCD", device.verification_uri_complete + "&client=qwen-code", "https://chat.qwen.ai/authorize?user_code=ABCD&client=other"]) {
     assert.throws(() => validateVerificationURL(url, "ABCD"))
+  }
+})
+
+test("server-selected same-origin path and absent client are accepted unchanged without polling", async () => {
+  for (const client of ["", "&client=qwen-code"]) {
+    let calls = 0
+    const complete = `https://chat.qwen.ai/synthetic-device-route?user_code=ABCD${client}`
+    const login = await beginLogin({ fetch: async () => {
+      calls++
+      return Response.json({ ...device, verification_uri: "https://chat.qwen.ai/synthetic-device-route", verification_uri_complete: complete })
+    } })
+    assert.equal(login.url, complete)
+    login.cancel()
+    await assert.rejects(login.callback, /cancelled/)
+    assert.equal(calls, 1)
+  }
+})
+
+test("device response cannot change origin or path between base and complete verification URLs", async () => {
+  for (const complete of ["https://chat.qwen.ai/other-path?user_code=ABCD", "https://evil.test/authorize?user_code=ABCD"]) {
+    let calls = 0
+    await assert.rejects(beginLogin({ fetch: async () => {
+      calls++
+      return Response.json({ ...device, verification_uri_complete: complete })
+    } }), error => {
+      const message = authorizationStartError(error).message
+      assert.match(message, /invalid_verification_url/)
+      assert.doesNotMatch(message, /ABCD|private-device|other-path|evil/)
+      return true
+    })
+    assert.equal(calls, 1)
+  }
+})
+
+test("authorization diagnostics expose only approved codes and numeric HTTP status", () => {
+  assert.match(authorizationStartError(new OAuthError("invalid_client", 403)).message, /invalid_client.*HTTP 403/)
+  assert.match(authorizationStartError(new OAuthError("network_error")).message, /network_error.*connectivity/i)
+  for (const error of [new Error("PRIVATE"), new OAuthError("PRIVATE", 403), { code: "invalid_client", message: "PRIVATE" }]) {
+    assert.doesNotMatch(authorizationStartError(error).message, /PRIVATE|403/)
   }
 })
 

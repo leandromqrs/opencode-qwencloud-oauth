@@ -15,6 +15,24 @@ export class OAuthError extends Error {
   constructor(readonly code: string, readonly status?: number, readonly retryAfterMs?: number) { super(`Qwen OAuth ${code}.`); this.name = "OAuthError" }
 }
 
+export function authorizationStartError(error: unknown): Error {
+  const guidance: Record<string, string> = {
+    invalid_verification_url: "Qwen returned an incompatible browser authorization URL; the plugin rejected it for safety. Verify the current official authorization contract before retrying.",
+    invalid_response: "Qwen returned an incompatible device authorization response. Check plugin/server compatibility.",
+    invalid_client: "Qwen rejected the fixed public OAuth client. Check current service availability and client compatibility.",
+    invalid_request: "Qwen rejected the device authorization request. Check plugin/server compatibility.",
+    access_denied: "Qwen denied device authorization. Check account/service access before retrying.",
+    request_failed: "Qwen rejected device authorization. Check service availability or request restrictions before retrying.",
+    network_error: "Check connectivity to auth.qwen.ai before retrying.",
+    request_timeout: "The Qwen authorization request timed out. Check connectivity before retrying.",
+    cancelled: "Device authorization was cancelled.",
+    expired_token: "The device authorization grant expired. Start sign-in again.",
+  }
+  if (!(error instanceof OAuthError) || !Object.hasOwn(guidance, error.code)) return new Error("Qwen device authorization could not start; retry later.")
+  const status = Number.isInteger(error.status) && error.status! >= 100 && error.status! <= 599 ? ` (HTTP ${error.status})` : ""
+  return new Error(`Qwen device authorization ${error.code}${status}. ${guidance[error.code]}`)
+}
+
 export function retryAfter(value: string | null, now = Date.now()): number | undefined {
   if (!value) return undefined
   const numeric = Number(value)
@@ -71,14 +89,17 @@ async function request(path: "device/code" | "token" | "userinfo", fetcher: Fetc
   }
 }
 
-export function validateVerificationURL(value: unknown, userCode?: string): string {
+export function validateVerificationURL(value: unknown, userCode?: string, verificationURI?: string): string {
   if (typeof value !== "string" || value.length > 4096) throw new OAuthError("invalid_verification_url")
   let url: URL
   try { url = new URL(value) } catch { throw new OAuthError("invalid_verification_url") }
-  if (url.origin !== "https://chat.qwen.ai" || url.username || url.password || url.pathname !== "/authorize" || url.hash
+  if (url.origin !== "https://chat.qwen.ai" || url.username || url.password || url.hash
     || [...url.searchParams.keys()].some(key => key !== "user_code" && key !== "client")
-    || (userCode !== undefined && (url.searchParams.getAll("user_code").length !== 1 || url.searchParams.get("user_code") !== userCode || url.searchParams.getAll("client").length !== 1 || url.searchParams.get("client") !== "qwen-code"))) throw new OAuthError("invalid_verification_url")
-  return url.toString()
+    || url.searchParams.getAll("user_code").length > 1 || url.searchParams.getAll("client").length > 1
+    || (url.searchParams.has("client") && url.searchParams.get("client") !== "qwen-code")
+    || (userCode !== undefined && (url.searchParams.getAll("user_code").length !== 1 || url.searchParams.get("user_code") !== userCode))
+    || (verificationURI !== undefined && url.pathname !== new URL(verificationURI).pathname)) throw new OAuthError("invalid_verification_url")
+  return value
 }
 
 function credential(data: Record<string, unknown>, now: number): Credential.OAuth {
@@ -111,8 +132,8 @@ export async function beginLogin(options: { fetch?: Fetch; signal?: AbortSignal;
   const issuedAt = now()
   const data = await request("device/code", fetcher, signal, new URLSearchParams({ client_id: CLIENT_ID, scope: SCOPE }))
   if (!secret(data.device_code) || typeof data.user_code !== "string" || !/^[a-zA-Z0-9-]{1,128}$/.test(data.user_code) || !seconds(data.expires_in) || !seconds(data.interval)) throw new OAuthError("invalid_response")
-  validateVerificationURL(data.verification_uri)
-  const url = validateVerificationURL(data.verification_uri_complete, data.user_code)
+  const verificationURI = validateVerificationURL(data.verification_uri)
+  const url = validateVerificationURL(data.verification_uri_complete, data.user_code, verificationURI)
   const deviceCode = data.device_code
   const expiresAt = issuedAt + data.expires_in * 1000
   const remaining = expiresAt - now()
