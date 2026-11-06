@@ -1,27 +1,53 @@
-# Qwen subscription quota availability
+# QwenCloud quota semantics
 
-## What is known
+QwenCloud exposes authenticated quota reads through its control-plane gateway. The old conclusion that Qwen Code subscriptions do not expose quota does **not** apply to this service.
 
-The official Qwen Code v0.26.8 subscription design exposes identity and membership, account model discovery, and inference error handling. It does not define a supported endpoint for remaining quota, a current balance, or a complete allocation/reset schedule.
+## Transport
 
-The CLI's `/usage` command reports local statistics. Historical free-tier daily request counts do not establish an allocation for a current Plus/Pro account. A plan name alone is not enough to calculate remaining credits.
+Requests use `POST https://cli.qwencloud.com/data/v2/api.json`, Bearer management OAuth, `product: BssOpenAPI-V3`, region `ap-southeast-1`, and string-valued parameters. Validate HTTP, outer business status and each action's inner payload before accepting a balance.
 
-## Panel contract
+## Token Plan Credits
 
-Return a `quota-v1` status row explaining that quota is not exposed. Do not label it a balance, fabricate zero, display a percentage, or infer a reset date. Adapter reachability and account quota availability are different states.
+The official [Token Plan service](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/services/tokenplan-service.ts) uses `QuerySubscriptionGray` to choose the seat-based path. A failed routing query is not proof that the legacy path applies.
 
-The optional standalone adapter uses an independent key and explicit OpenCode location. It must only invoke the native Qwen quota RPC after successful adapter authentication. No OAuth tokens should leave native context, and no adapter TCP listener should be owned by a project plugin scope.
+Seat summaries use `GetSeatSubscriptionSummary` and product code `sfm_tokenplanteams_dp_intl`. Groups can contain `TotalValue`, `SurplusValue`, `EquityList` and `NextCycleFlushTime`. Numeric cycle timestamps are milliseconds. These may be team/account aggregates, not the current user's individual allocation.
 
-## Local validation
+Legacy balances use `DescribeFrInstances` with `Group: tokenPlan` and commodity codes:
 
-On 2026-11-06 the plugin was registered globally and the standalone adapter was started against this checkout. Native status confirmed a disconnected account and blocked inference. The native quota RPC returned the unsupported status without authentication to Qwen. The bridge returned HTTP 401 without its adapter key and HTTP 200 with that key, projecting a status-only `quota-v1` response.
+- Personal: `sfm_tokenplanpersonal_dp_intl`.
+- Team: `sfm_tokenplanteams_dp_intl`.
+- Addon: `sfm_tokenplanteamsaddon_dp_intl`.
 
-The `qwen-code-quota` custom provider was saved **disabled**. The quota panel still needs the independent `QWEN_CODE_QUOTA_ADAPTER_KEY` in its OpenCode service environment before enabling it. A variable exported in another terminal does not update an already-running service. Do not enable the provider and rely on a fallback OAuth/API key; use the dedicated adapter key only.
+`InitCapacityBaseValue` is allocation; `CurrCapacityBaseValue` is remaining. For `CapacityTypeCode: periodMonthlyShift`, the CLI prefers `periodCapacityBaseValue`; preserve an explicit zero rather than using a truthiness fallback. Only validated active instances can be presented as current allowance. Pagination and partial failures must remain visible, not silently produce a complete-looking sum.
 
-The adapter's private key lives outside the repository at `~/.config/opencode/qwen-code/quota-adapter.key`. The transient service is not boot-enabled. These checks establish local adapter operation, not a live Qwen account login, remaining-quota API, or enabled panel integration.
+Do not divide by Junie's 100,000 conversion factor. Keep plan allowance and Credit Packs separate. Do not infer reset from `EndTime` or advertised plan allocations.
 
-## Exhaustion is not a quota query
+## Other measurements
 
-The [official subscription design](https://github.com/QwenLM/qwen-code/blob/v0.26.8/docs/design/qwen-subscription.md#quota-exhaustion-presentation) identifies exhaustion only when HTTP **402** and `error.code = insufficient_quota` occur together. Optional `quota.reset_at` is an integer Unix timestamp in seconds; missing, invalid, or elapsed timestamps must be omitted.
+`DescribeFqInstance` exposes free-tier capacities with their own units and cycle dates. Multiple model IDs can share one template allowance; do not sum duplicate model projections.
 
-That error is observed as a result of a model or search request, not a supported balance endpoint. Do not issue inference to provoke it. No exhaustion/reset observation has been collected for this account.
+Coding Plan quota windows, PAYG usage and `DescribeUsageLimit` spending controls are separate measurements. A configured spending limit is not a monetary wallet balance. No monetary-wallet endpoint was established in this research.
+
+## Truthful states
+
+Before live account validation, quota is **unverified**, not unsupported. Distinguish disconnected, unknown, partial, failed, absent and available observations. Never turn errors or missing values into zero or “not subscribed.” Preserve source, scope, unit, observation time and independently optional total/remaining/reset fields.
+
+## Implemented scope and adapter
+
+The replacement implements Token Plan reads only. Free-tier, Coding Plan, wallet and billing reads remain outside this version. A read has a ten-second overall deadline, a 256-KiB limit per response, at most four gateway calls and at most 32 returned balances. Legacy subscription/addon reads use the first page; detected additional pages or output truncation produce partial results with diagnostics.
+
+The standalone adapter invokes `qwencloud/quota` for an explicit native location after validating its independent key. Its native response limit is 32 KiB; its loopback listener remains separate from project/plugin lifecycles.
+
+After building and preparing an owner-private key file:
+
+```sh
+bash scripts/quota-adapter.sh start --location /absolute/project
+bash scripts/quota-adapter.sh status
+bash scripts/quota-adapter.sh stop
+```
+
+Use `run` for foreground operation. The unit is `opencode-qwencloud-quota-adapter.service`, with default key file `~/.config/opencode/qwencloud/quota-adapter.key` (respecting `XDG_CONFIG_HOME`) and key environment name `QWENCLOUD_QUOTA_ADAPTER_KEY`. Never reuse an OAuth token or inference key as this adapter key.
+
+The quota panel's OpenCode process must receive the same adapter key. Exporting it in another terminal does not update a running server. The current transient adapter is not boot-enabled; starting a service once is not a persistent reboot repair.
+
+Official product semantics: [Token Plan overview](https://docs.qwencloud.com/token-plan/overview), [personal plan](https://docs.qwencloud.com/token-plan/personal/token-plan-personal-overview), [team plan](https://docs.qwencloud.com/token-plan/team/token-plan-team-overview).

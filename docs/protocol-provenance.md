@@ -1,52 +1,44 @@
-# Protocol provenance
+# QwenCloud protocol provenance
 
-Research baseline: official Qwen Code v0.26.8, published 2026-11-05, commit `21ed8f1efbb351b973d96e2bc9efa78f278df99c`. Source inspection is not live account validation.
+Baseline: installed `@qwencloud/qwencloud-cli` **1.5.0**, official repository [QwenCloud/qwencloud-cli](https://github.com/QwenCloud/qwencloud-cli), inspected revision `264999e87d2fe819a9c570a9f3cbc1c9864a5163`.
 
-## Official sources
+The installed package manifest confirms its identity and repository; bundled constants corroborate the inspected protocol. This is not a claim of byte-identical build provenance. Source research did not read CLI credential files or invoke inference.
 
-- [Authentication guide](https://github.com/QwenLM/qwen-code/blob/v0.26.8/docs/users/configuration/auth.md)
-- [Production OAuth constants](https://github.com/QwenLM/qwen-code/blob/v0.26.8/packages/core/src/qwen/oauth-config.ts)
-- [Subscription device/token client](https://github.com/QwenLM/qwen-code/blob/v0.26.8/packages/core/src/qwen/subscription-oauth-client.ts)
-- [Session and model catalog lifecycle](https://github.com/QwenLM/qwen-code/blob/v0.26.8/packages/core/src/qwen/subscription-session.ts)
-- [Fixed inference transport](https://github.com/QwenLM/qwen-code/blob/v0.26.8/packages/core/src/qwen/subscription-content-generator.ts)
-- [Subscription model metadata](https://github.com/QwenLM/qwen-code/blob/v0.26.8/packages/core/src/qwen/subscription-models.ts)
-- [Subscription design and security contract](https://github.com/QwenLM/qwen-code/blob/v0.26.8/docs/design/qwen-subscription.md)
-- [OpenAI request pipeline and thinking mappings](https://github.com/QwenLM/qwen-code/blob/v0.26.8/packages/core/src/core/openaiContentGenerator/pipeline.ts)
+## Device authorization
 
-## Current subscription OAuth
+Official sources:
 
-Fixed auth origin: `https://auth.qwen.ai`. Public client ID: `qwen-code-cli`. Scope: `model:invoke profile:read`. No client secret.
+- [Auth client](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/api/auth-client.ts)
+- [Login lifecycle](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/auth/login-flow.ts)
+- [Client identity](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/auth/client-id.ts)
+- [PKCE](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/auth/pkce.ts)
 
-- Device authorization: `POST /api/oauth/device/code`.
-- Polling and refresh: `POST /api/oauth/token`.
-- Identity/membership: `GET /api/oauth/userinfo`.
-- Refresh-token revocation: `POST /api/oauth/revoke`.
+Initialization is `POST https://t.qwencloud.com/cli/device/code` with query parameters `client_id`, `code_challenge` and `code_challenge_method=S256`. The client ID is a locally generated persistent UUID, not the public client identifier from Qwen Code subscription OAuth. The plugin must own its own client ID.
 
-POST bodies use form encoding. Device polling honors the returned interval and original expiry, `authorization_pending`, `slow_down`, cancellation, and bounded backoff. Tokens require a nonempty access token and refresh token, `Bearer` token type, scope, and a positive expiry. Refresh rotates the complete token pair.
+The response uses `Success` and `Data`, whose fields include `Token`, `VerificationUrl`, `ExpiresIn` and `Interval`. Polling is `POST /cli/device/token` with `client_id`, `token` and `code_verifier`. Successful credentials include `Data.Credentials.AccessToken` and `ExpireTime`. The CLI also accepts compatibility spellings.
 
-Browser authorization uses the server-returned verification URLs on the Qwen web origin. The design document's `/authorize` path and `client=qwen-code` parameter are illustrative, not required response fields: the official client validates both fields as URLs and returns them unchanged. A live device request returned same-origin verification URLs with a different path and no `client` parameter. The plugin preserves the supplied URL, requires matching base/complete paths and user codes, and rejects foreign origins, userinfo, fragments and unexpected or duplicate query parameters. Do not construct a fake success URL or treat website login as account activation.
+These query values are secrets: never copy the upstream pattern of exposing complete URLs in errors. Two public device initializations verified the production browser destination as `https://account.qwencloud.com/sso/OIDCAuth`, with query keys `app_type`, `lang`, `auth_token` and `oauth_callback`. The nested callback destination is `https://www.qwencloud.com/oauth/confirm`, with its own `auth_token`. Validation pins these destinations and rejects duplicate or extra parameters; the server URL is returned unchanged. No issued codes, tokens or complete URLs were logged or retained, and no token polling or account approval was performed in those checks.
 
-The legacy `qwen-oauth` flow is different: it uses old endpoints, PKCE, and optional resource routing. Its source presence does not make the discontinued free service a supported target.
+The inspected CLI has no implemented refresh endpoint. Expired management credentials require login again. Its displayed scopes are hardcoded status metadata, not negotiated evidence.
 
-## Models and reasoning
+## Management requests and catalog
 
-The current gateway is `https://api.qwen.ai/compatible-mode/v1`. Model discovery is authenticated `GET /models`; inference uses OpenAI Chat Completions at `/chat/completions`.
+The authenticated gateway is `POST https://cli.qwencloud.com/data/v2/api.json` with Bearer management credentials. Its envelope contains `product`, `action`, `region` and `params`; parameter values are flattened to strings. HTTP 200 alone is insufficient: the outer business `code` must be the string `"200"`.
 
-The official model parser consumes IDs, not limits, prices, tool support, or reasoning capabilities. It accepts actual server-returned IDs rather than a predefined list. A forbidden response must not fall back to cached models. Unknown metadata must remain unknown.
+Model discovery uses `product: AliyunDeliveryService`, `action: ListModelSeries`, `region: ap-southeast-1` and `params.Language: en-US`. Groups are returned under `data.Data`, containing `Items`. IDs and metadata use the actual `Model`, `InferenceMetadata` and `ModelInfo` fields. Do not reuse the old service's embedded reasoning mappings.
 
-Official subscription thinking mappings for `qwen3.8-max` and `qwen3.8-flash` are:
+Sources: [request adapter](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/api/request-adapter.ts), [models service](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/services/models-service.ts).
 
-| Selection | `enable_thinking` | `thinking_budget` |
-| --- | --- | --- |
-| off | false | omitted |
-| low | true | 4096 |
-| medium | true | 16384 |
-| high | true | 32768 |
+## Inference is a separate credential boundary
 
-Upstream `xhigh` and `max` collapse to the high budget, not distinct stronger modes. Conflicting `reasoning`, `reasoning_effort`, and nested thinking switches must not override this subscription mapping. Unknown model IDs must not receive speculative controls.
+The [invocation resolver](https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/services/invocation-credential-resolver.ts) obtains API keys separately from management OAuth. Model calls use the compatible Chat endpoint, not the control-plane gateway.
 
-The upstream design records parameter acceptance for Max, not strict budget enforcement or Flash gateway acceptance. This project has not repeated those inference probes.
+Current documented OpenAI bases are `https://ap-southeast-1.maas.qwencloudapi.com/compatible-mode/v1` for PAYG and `https://token-plan.maas.qwencloudapi.com/compatible-mode/v1` for Token Plan. The inspected CLI still contains older Alibaba endpoint defaults. The replacement must verify its routing explicitly, never silently fall back to PAYG, and never send management tokens to model endpoints.
 
-## Host transport limitation
+Live OAuth, account catalog and key provisioning remain pending. Inference also remains blocked by the installed OpenCode host transport limitation.
 
-Installed OpenCode 2.2.5 converts hook-returned Requests through a path that drops their redirect policy and signal. This was separately diagnosed during the Junie integration. Correct source-level request preparation does not establish safe end-to-end host dispatch. Production inference must remain blocked; metadata requests use a separately bounded direct fetch path.
+## Key-provisioning evidence and remaining boundary
+
+The inspected CLI's login does not create inference keys. Missing keys direct users to the console's API Keys page. Public console assets expose separate operations for PAYG, personal Token Plan and team Token Plan key creation, but their shared browser transport uses session cookies and CSRF handling. That does not establish that a CLI Bearer management token can invoke those actions through the CLI gateway.
+
+No account key was created, reset, revealed or revoked. Automatic provisioning remains pending verification of that bridge and the correct plan/account/workspace scope; the plugin reports `keyProvisioning: unavailable-contract` rather than pretending login created a usable key.
