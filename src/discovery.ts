@@ -99,7 +99,7 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
       metadataSource: METADATA_SOURCE,
       limitSource: "QwenCloud management catalog ModelInfo; missing limits unknown (native zero sentinel).",
       capabilitySource: "QwenCloud InferenceMetadata modalities; tool support and reasoning variants unknown.",
-      pricing: "unknown", entitlement: "unverified",
+      pricing: "QwenCloud management catalog reference tariffs using CLI display order and explicit-cache precedence; absent cache rates estimated at ordinary input; not actual Token Plan cash charges.", entitlement: "unverified",
       accountListed: cached?.snapshot.catalog ?? null,
       supported: cached?.models ?? [], inference,
     }

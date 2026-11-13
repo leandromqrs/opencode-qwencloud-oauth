@@ -1,8 +1,9 @@
 import { boundedJSON, object, type Fetch } from "./oauth.js"
+import { sanitizePricing, type PricingMetadata } from "./pricing.js"
 
 export const MANAGEMENT_ORIGIN = "https://cli.qwencloud.com"
 export type Modality = "text" | "image" | "video" | "audio"
-export interface ListedModel { id: string; context?: number; inputLimit?: number; output?: number; inputModalities?: Modality[]; outputModalities?: Modality[] }
+export interface ListedModel { id: string; context?: number; inputLimit?: number; output?: number; inputModalities?: Modality[]; outputModalities?: Modality[]; pricing?: PricingMetadata }
 export interface Catalog { fetchedAt: number; models: ListedModel[] }
 export const safeModelID = (value: unknown): value is string => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}$/.test(value)
 
@@ -24,7 +25,8 @@ export function parseListing(payload: unknown): ListedModel[] {
       const raw = object(entry)
       const info = object(raw?.ModelInfo)
       const inference = object(raw?.InferenceMetadata)
-      models.push({ id: raw?.Model as string, ...(limit(info?.ContextWindow) ? { context: Number(info?.ContextWindow) } : {}), ...(limit(info?.MaxInputTokens) ? { inputLimit: Number(info?.MaxInputTokens) } : {}), ...(limit(info?.MaxOutputTokens) ? { output: Number(info?.MaxOutputTokens) } : {}), ...(Array.isArray(inference?.RequestModality) ? { inputModalities: modalities(inference.RequestModality) } : {}), ...(Array.isArray(inference?.ResponseModality) ? { outputModalities: modalities(inference.ResponseModality) } : {}) })
+      const pricing = sanitizePricing(raw)
+      models.push({ id: raw?.Model as string, ...(limit(info?.ContextWindow) ? { context: Number(info?.ContextWindow) } : {}), ...(limit(info?.MaxInputTokens) ? { inputLimit: Number(info?.MaxInputTokens) } : {}), ...(limit(info?.MaxOutputTokens) ? { output: Number(info?.MaxOutputTokens) } : {}), ...(Array.isArray(inference?.RequestModality) ? { inputModalities: modalities(inference.RequestModality) } : {}), ...(Array.isArray(inference?.ResponseModality) ? { outputModalities: modalities(inference.ResponseModality) } : {}), ...(pricing ? { pricing } : {}) })
       if (models.length > 2000) throw new CatalogError("invalid_response")
     }
   }
@@ -40,7 +42,8 @@ export function sanitizeSavedModels(value: unknown): ListedModel[] {
   for (const entry of value) {
     const raw = object(entry)
     if (!raw || !safeModelID(raw.id)) throw new CatalogError("invalid_response")
-    models.set(raw.id, { id: raw.id, ...(limit(raw.context) ? { context: raw.context } : {}), ...(limit(raw.inputLimit) ? { inputLimit: raw.inputLimit } : {}), ...(limit(raw.output) ? { output: raw.output } : {}), ...(Array.isArray(raw.inputModalities) ? { inputModalities: modalities(raw.inputModalities) } : {}), ...(Array.isArray(raw.outputModalities) ? { outputModalities: modalities(raw.outputModalities) } : {}) })
+    const pricing = sanitizePricing(raw.pricing)
+    models.set(raw.id, { id: raw.id, ...(limit(raw.context) ? { context: raw.context } : {}), ...(limit(raw.inputLimit) ? { inputLimit: raw.inputLimit } : {}), ...(limit(raw.output) ? { output: raw.output } : {}), ...(Array.isArray(raw.inputModalities) ? { inputModalities: modalities(raw.inputModalities) } : {}), ...(Array.isArray(raw.outputModalities) ? { outputModalities: modalities(raw.outputModalities) } : {}), ...(pricing ? { pricing } : {}) })
   }
   return [...models.values()]
 }
