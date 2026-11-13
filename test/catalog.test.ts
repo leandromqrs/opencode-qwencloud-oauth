@@ -165,10 +165,10 @@ test("catalog sanitizes actual management metadata and never embeds subscription
   assert.throws(() => parseListing({ data: [] }))
   const model = reconcileCatalog({ fetchedAt: 1, models: [{ id: "qwen3.8-max" }] })[0]
   assert.equal(model.context, null)
-  assert.deepEqual(model.efforts, [])
+  assert.deepEqual(model.efforts, ["none", "low", "medium", "xhigh"])
   assert.deepEqual(nativeModel(model).limit, { context: 0, output: 0 })
   assert.deepEqual(nativeModel(model).cost, [])
-  assert.deepEqual(nativeModel(model).variants, [])
+  assert.deepEqual(nativeModel(model).variants.map(variant => variant.id), ["none", "low", "medium", "xhigh"])
   assert.match(METADATA_SOURCE, /QwenCloud\/qwencloud-cli/)
 })
 

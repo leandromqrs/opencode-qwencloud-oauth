@@ -13,6 +13,7 @@ import { Effect, Stream } from "effect"
 import { FetchHttpClient, HttpClientRequest } from "effect/http"
 import { model } from "../src/driver.js"
 import { API_BASE } from "../src/transport.js"
+import { nativeModel, reconcileCatalog } from "../src/inventory.js"
 
 const settings = { baseURL: API_BASE, apiKey: "sk-sp-fixture" }
 const chunk = (delta: unknown, finish_reason: string | null = null) => ({ id: "fixture-id", object: "chat.completion.chunk", created: 1, model: "qwen3.8-max", choices: [{ index: 0, delta, finish_reason }] })
@@ -22,6 +23,36 @@ const frames = [
   chunk({ tool_calls: [{ index: 0, function: { arguments: '"test"}' } }] }), chunk({}, "tool_calls"),
   { id: "fixture-id", object: "chat.completion.chunk", created: 1, model: "qwen3.8-max", choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
 ].map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n"
+
+test("published Qwen effort selections reach the secured wire while an unselected model keeps upstream defaults", async () => {
+  for (const id of ["qwen4-max-preview", "qwen3.8-max", "qwen3.8-flash"]) {
+    const native = nativeModel(reconcileCatalog({ fetchedAt: 1, models: [{ id }] })[0])
+    assert.deepEqual(native.variants.map(variant => variant.id), ["none", "low", "medium", "xhigh"])
+    for (const variant of [undefined, ...native.variants]) {
+      let requests = 0
+      const fetcher: typeof fetch = async input => {
+        assert.ok(input instanceof Request)
+        assert.equal(input.url, `${API_BASE}/chat/completions`)
+        assert.equal(input.headers.get("authorization"), "Bearer sk-sp-fixture")
+        const body = await input.json()
+        assert.equal(body.model, id)
+        assert.equal(body.reasoning_effort, variant?.id)
+        assert.equal(Object.hasOwn(body, "reasoning_effort"), variant !== undefined)
+        assert.equal(Object.hasOwn(body, "reasoningEffort"), false)
+        assert.equal(Object.hasOwn(body, "thinking_budget"), false)
+        assert.equal(Object.hasOwn(body, "enable_thinking"), false)
+        requests++
+        return new Response(frames, { headers: { "Content-Type": "text/event-stream" } })
+      }
+      const fixture = harness(fetcher)
+      try {
+        await fixture.run(model(id, { ...native.settings, ...variant?.settings, baseURL: API_BASE, apiKey: "sk-sp-fixture" }))
+        assert.equal(requests, 1)
+        assert.equal(fixture.roundtrips(), 1)
+      } finally { await fixture.client.dispose() }
+    }
+  }
+})
 
 function harness(fetcher: typeof fetch, replacement?: (request: Request) => Promise<Request>) {
   let roundtrips = 0
