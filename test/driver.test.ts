@@ -98,6 +98,33 @@ test("native secured route survives lossy host hook conversion with real fragmen
   } finally { await h.client.dispose(); await close(server) }
 })
 
+test("default native deadline allows reasoning responses beyond two minutes", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] })
+  let began!: () => void
+  const started = new Promise<void>(resolve => { began = resolve })
+  let signal!: AbortSignal
+  let upstream!: ReadableStreamDefaultController<Uint8Array>
+  const h = harness(async input => {
+    assert.ok(input instanceof Request)
+    signal = input.signal
+    return new Response(new ReadableStream<Uint8Array>({ start(controller) { upstream = controller; began() } }), { headers: { "content-type": "text/event-stream" } })
+  })
+  const running = h.run().then(events => ({ events }), error => ({ error }))
+  try {
+    await started
+    context.mock.timers.tick(180_000)
+    assert.equal(signal.aborted, false)
+    upstream.enqueue(new TextEncoder().encode(frames))
+    upstream.close()
+    const result = await running
+    assert.ok("events" in result)
+    assert.ok(result.events.some(event => event.type === "finish"))
+  } finally {
+    try { upstream.close() } catch {}
+    await h.client.dispose()
+  }
+})
+
 test("native route rejects invalid credentials/settings before network and rejects hook destination/model substitution", async () => {
   for (const bad of [{ apiKey: undefined }, { apiKey: "management-token" }, { apiKey: "sk-payg-fixture" }, { baseURL: "https://evil.test" }, { timeout: 0 }]) assert.throws(() => model("qwen3.8-max", { ...settings, ...bad }))
   for (const invalid of ["", "bad\nmodel", "x".repeat(257)]) assert.throws(() => model(invalid, settings), /model/)

@@ -4,7 +4,7 @@ import { authorizationStartError, beginLogin, METHOD_ID, requireReauthentication
 import { randomUUID } from "node:crypto"
 import { CATALOG_CHANGED_EVENT, catalogRPC, connectionKey, createDiscovery, type ActiveConnection, type CatalogNotification } from "./discovery.js"
 import { nativeModel, type AccountModel } from "./inventory.js"
-import { API_BASE, KEY_INTEGRATION_ID } from "./transport.js"
+import { API_BASE, DEFAULT_TIMEOUT_MS, KEY_INTEGRATION_ID } from "./transport.js"
 
 export const PROVIDER_ID = Provider.ID.make("qwencloud")
 export const INTEGRATION_ID = Integration.ID.make("qwencloud-oauth")
@@ -13,7 +13,7 @@ export { KEY_INTEGRATION_ID } from "./transport.js"
 
 export function parseOptions(options: Record<string, unknown>): { timeoutMs: number } {
   if (Object.keys(options).some(key => key !== "timeoutMs")) throw new Error("QwenCloud accepts only timeoutMs; gateway overrides, fabricated models and unsafe inference bypasses are unsupported.")
-  const timeoutMs = options.timeoutMs ?? 120_000
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1000 || Number(timeoutMs) > 600_000) throw new Error("Qwen timeoutMs must be between 1000 and 600000.")
   return { timeoutMs: Number(timeoutMs) }
 }

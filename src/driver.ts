@@ -2,13 +2,13 @@ import { model as compatibleModel, type Settings } from "@opencode/ai/providers/
 import { LanguageModel } from "@opencode/ai"
 import { Effect } from "effect"
 import { FetchHttpClient } from "effect/http"
-import { API_BASE, isInferenceKey, prepareRequest } from "./transport.js"
+import { API_BASE, DEFAULT_TIMEOUT_MS, isInferenceKey, prepareRequest } from "./transport.js"
 
 /** Native Token Plan model with a deadline covering dispatch and streamed responses. */
 export function model(modelID: string, settings: Settings): ReturnType<typeof compatibleModel> {
   // The host strips its own timeout setting before invoking provider modules.
   const { timeout: nativeTimeout, qwencloudTimeoutMs: configuredTimeout, transport: _transport, ...options } = settings
-  const timeout = configuredTimeout ?? nativeTimeout ?? 120_000
+  const timeout = configuredTimeout ?? nativeTimeout ?? DEFAULT_TIMEOUT_MS
   if (!Number.isSafeInteger(timeout) || Number(timeout) < 1000 || Number(timeout) > 600_000) throw new Error("QwenCloud timeout must be between 1000 and 600000.")
   if (settings.baseURL !== undefined && settings.baseURL !== API_BASE) throw new Error("Unsupported QwenCloud inference destination.")
   if (!isInferenceKey(settings.apiKey) || !settings.apiKey.startsWith("sk-sp-")) throw new Error("A separate Token Plan API key is required. Create one at https://home.qwencloud.com/api-keys (shown once). Management tokens and PAYG fallback are not supported.")

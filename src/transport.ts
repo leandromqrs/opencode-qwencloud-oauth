@@ -1,5 +1,6 @@
 export const API_BASE = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 export const KEY_INTEGRATION_ID = "qwencloud-api-key"
+export const DEFAULT_TIMEOUT_MS = 600_000
 
 export function isInferenceKey(value: unknown): value is string {
   return typeof value === "string" && /^sk-[\x21-\x7e]{1,32765}$/.test(value)
@@ -13,7 +14,7 @@ export function inferenceBase(routing: InferenceRouting): string {
   return "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 }
 
-export async function prepareRequest(request: Request, apiKey: string, allowedModels: readonly string[], routing: InferenceRouting, timeoutMs = 120_000, signal?: AbortSignal): Promise<Request> {
+export async function prepareRequest(request: Request, apiKey: string, allowedModels: readonly string[], routing: InferenceRouting, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<Request> {
   const base = inferenceBase(routing)
   if (request.url !== `${base}/chat/completions` || request.method !== "POST") throw new Error("Unsupported QwenCloud inference destination.")
   request.signal.throwIfAborted()
