@@ -53,7 +53,7 @@ test("native plugin registers separate key auth and secured driver without start
     assert.equal(auth?.integrationID, "qwencloud-oauth")
     assert.equal(auth?.method.id, "device")
     assert.equal(auth?.method.label, "Sign in with QwenCloud")
-    assert.deepEqual(Object.keys(handlers).sort(), ["catalog", "quota", "refresh", "status"])
+    assert.deepEqual(Object.keys(handlers).sort(), ["catalog", "managementQuota", "quota", "refresh", "status"])
     assert.equal((await Effect.runPromise(handlers.status())).keyProvisioning, "manual-key-required")
     assert.deepEqual((await Effect.runPromise(handlers.status())).inferenceKey, { integrationID: "qwencloud-api-key", state: "not-connected", accountBinding: "unverified" })
     keyConnected = true
@@ -72,6 +72,67 @@ test("native plugin registers separate key auth and secured driver without start
     await Effect.runPromise(plugin.effect(ctx as unknown as Plugin.Context).pipe(Scope.provide(scope)))
     assert.equal(storage.values.get("device-client-id:v1"), deviceID)
     assert.equal(requests, 0)
+  } finally { await Effect.runPromise(Scope.close(scope, Exit.void)); globalThis.fetch = original }
+})
+
+test("native OAuth resolution does not refresh valid near-expiry sessions or hide actual expiry", async () => {
+  let auth!: IntegrationOAuthMethodRegistration
+  let expires = Date.now() + 60_000
+  let calls = 0
+  let refreshes = 0
+  const handlers: Record<string, () => Effect.Effect<any>> = {}
+  const registration = { dispose: Effect.void, events: { emit: () => Effect.void } }
+  const fixture = fixtureContext()
+  const ctx = {
+    ...fixture.ctx, options: {}, event: { subscribe: () => Stream.empty },
+    provider: { transform: () => Effect.succeed(registration), reload: () => Effect.void },
+    rpc: { register: (_definition: unknown, implementations: typeof handlers) => Effect.sync(() => { Object.assign(handlers, implementations); return registration }) },
+    session: { hook: () => Effect.succeed(registration) },
+    integration: {
+      transform: (fn: any) => Effect.sync(() => {
+        fn({ method: { update: (value: IntegrationMethodRegistration) => { if (value.method.type === "oauth") auth = value as IntegrationOAuthMethodRegistration } }, update: () => {} })
+        return registration
+      }),
+      connection: {
+        active: (id: string) => id === "qwencloud-oauth" ? fixture.ctx.integration.connection.active(id) : Effect.succeed(undefined),
+        resolve: () => Effect.gen(function* () {
+          const credential = { type: "oauth" as const, methodID: "device" as never, access: "fixture-access", refresh: "", expires }
+          if (auth.refresh && credential.expires <= Date.now() + 5 * 60_000) {
+            refreshes++
+            return yield* auth.refresh(credential)
+          }
+          return credential
+        }),
+      },
+    },
+  }
+  const original = globalThis.fetch
+  globalThis.fetch = async (input, init) => {
+    calls++
+    assert.equal(String(input), "https://cli.qwencloud.com/data/v2/api.json")
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-access")
+    const { action } = JSON.parse(init?.body as string)
+    return Response.json({ code: "200", data: action === "QuerySubscriptionGray" ? { IsGray: false } : { Data: [] } })
+  }
+  const scope = await Effect.runPromise(Scope.make())
+  try {
+    await Effect.runPromise(plugin.effect(ctx as unknown as Plugin.Context).pipe(Scope.provide(scope)))
+    assert.equal(typeof handlers.quota, "function")
+    assert.equal(typeof handlers.managementQuota, "function")
+    const quota = await Effect.runPromise(handlers.managementQuota())
+    assert.equal(quota.state, "unknown")
+    assert.deepEqual(quota.diagnostics, [])
+    assert.equal(calls, 4)
+    assert.equal(refreshes, 0)
+    assert.equal(auth.refresh, undefined)
+    assert.equal((await Effect.runPromise(handlers.status())).management, "configured-unverified")
+    expires = 1
+    const expired = await Effect.runPromise(handlers.managementQuota())
+    assert.equal(expired.state, "error")
+    assert.deepEqual(expired.diagnostics, [{ action: "quota", code: "session-expired" }])
+    assert.equal((await Effect.runPromise(handlers.status())).management, "expired")
+    assert.equal(calls, 4)
+    assert.equal(refreshes, 0)
   } finally { await Effect.runPromise(Scope.close(scope, Exit.void)); globalThis.fetch = original }
 })
 

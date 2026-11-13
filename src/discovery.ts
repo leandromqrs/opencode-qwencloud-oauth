@@ -5,7 +5,8 @@ import { CatalogError, discoverCatalog, sanitizeSavedModels, MANAGEMENT_ORIGIN, 
 import { METADATA_SOURCE, reconcileCatalog, type AccountModel } from "./inventory.js"
 import { AUTH_ORIGIN, object, type Fetch } from "./oauth.js"
 import { API_BASE, KEY_INTEGRATION_ID } from "./transport.js"
-import { getQwenCloudQuota, qwenCloudQuotaSchema } from "./quota.js"
+import { getQwenCloudQuota, qwenCloudQuotaSchema, type QwenCloudQuota } from "./quota.js"
+import { readAlibabaConsoleQuota, type QuotaCliRunner } from "./quota-cli.js"
 
 export const CATALOG_CHANGED_EVENT = "rpc.qwencloud.catalogUpdated"
 const VERSION = 2
@@ -18,12 +19,18 @@ export interface CatalogNotification { deniedAccount?: string }
 export const catalogRPC = Rpc.define({ id: "qwencloud", methods: {
   refresh: { input: emptyInput, output: publicOutput }, status: { input: emptyInput, output: publicOutput },
   catalog: { input: emptyInput, output: publicOutput }, quota: { input: emptyInput, output: qwenCloudQuotaSchema },
+  managementQuota: { input: emptyInput, output: qwenCloudQuotaSchema },
 }, events: { catalogUpdated: { schema: catalogEventSchema } } })
 export type ActiveConnection = Parameters<Plugin.Context["integration"]["connection"]["resolve"]>[0]
 export const connectionKey = (connection: ActiveConnection | undefined) => connection?.type === "credential" && connection.method === "oauth" ? `credential:${connection.id}` : undefined
 const accountHash = (connection: ActiveConnection) => createHash("sha256").update(`${ROUTING}:${connectionKey(connection)}`).digest("hex")
 export const catalogStorageKey = (connection: ActiveConnection) => `catalog:v${VERSION}:${accountHash(connection)}`
 interface Snapshot { catalog: Catalog }
+type ManagementState = "configured-unverified" | "expired" | "unavailable" | "unauthorized"
+
+function quotaFailure(code: "session-expired" | "credentials-unavailable" | "account-changed"): QwenCloudQuota {
+  return { state: "error", source: "qwencloud-token-plan", observedAt: new Date().toISOString(), balances: [], diagnostics: [{ action: "quota", code }] }
+}
 
 function restore(value: unknown, connection: ActiveConnection): Snapshot | undefined {
   const record = object(value)
@@ -38,18 +45,26 @@ function snapshot(connection: ActiveConnection, value: Snapshot) {
 }
 
 /** Account-bound metadata and explicit management reads; published models do not establish inference entitlement. */
-export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountModel[], connection: ActiveConnection) => Effect.Effect<void>, notify: (data: CatalogNotification) => Effect.Effect<void> = () => Effect.void, dependencies: { fetch?: Fetch } = {}) {
+export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountModel[], connection: ActiveConnection) => Effect.Effect<void>, notify: (data: CatalogNotification) => Effect.Effect<void> = () => Effect.void, dependencies: { fetch?: Fetch; quotaRunner?: QuotaCliRunner } = {}) {
   let cached: { connection: ActiveConnection; snapshot: Snapshot; models: AccountModel[] } | undefined
   let refreshing = false
   let storageState: "available" | "invalid" | "unavailable" = "available"
+  let management: { connection: string; state: ManagementState; expires?: number } | undefined
   const denied = new Set<string>()
   const lock = Semaphore.makeUnsafe(1)
   const active = Effect.suspend(() => ctx.integration.connection.active("qwencloud-oauth"))
+  const observeManagement = (connection: ActiveConnection, credential: { type: string; expires?: number; access?: string } | undefined): ManagementState => {
+    const validExpiry = credential?.type === "oauth" && Number.isSafeInteger(credential.expires) && Number(credential.expires) > 0
+    const state = !validExpiry || !credential?.access ? "unavailable" : Number(credential.expires) <= Date.now() ? "expired" : "configured-unverified"
+    management = { connection: connectionKey(connection)!, state, ...(validExpiry ? { expires: credential.expires } : {}) }
+    return state
+  }
   const current = Effect.gen(function* () {
     const result = yield* lock.withPermit(Effect.gen(function* () {
       const connection = yield* active
       const old = cached
       if (!connectionKey(connection) || connectionKey(cached?.connection) !== connectionKey(connection)) cached = undefined
+      if (management?.connection !== connectionKey(connection)) management = undefined
       if (connection && connectionKey(connection)) {
         const loaded = yield* ctx.storage.get(catalogStorageKey(connection)).pipe(Effect.map(value => ({ ok: true, value })), Effect.catchDefect(() => Effect.succeed({ ok: false, value: undefined })))
         if (connectionKey(connection) !== connectionKey(yield* active)) { cached = undefined; return { connection: undefined, changed: !!old, previous: old?.connection } }
@@ -80,6 +95,7 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
     const ageMs = cached ? Math.max(0, Date.now() - cached.snapshot.catalog.fetchedAt) : null
     return {
       connected: !!connectionKey(connection), refreshing,
+      management: !connectionKey(connection) ? "not-connected" : !management ? "stored-unverified" : management.expires !== undefined && management.expires <= Date.now() ? "expired" : management.state,
       refreshedAt: cached?.snapshot.catalog.fetchedAt ?? null,
       supportedModels: cached?.models.length ?? 0,
       storage: storageState,
@@ -117,6 +133,7 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
   const handleEvent = (event: unknown) => Effect.gen(function* () {
     const envelope = object(event)
     const data = object(envelope?.data)
+    if (envelope?.type === "credential.updated" || (envelope?.type === "credential.switched" && data?.integrationID === "qwencloud-oauth")) management = undefined
     if (envelope?.type === CATALOG_CHANGED_EVENT && typeof data?.deniedAccount === "string" && /^[a-f0-9]{64}$/.test(data.deniedAccount)) {
       const hash = data.deniedAccount
       yield* lock.withPermit(Effect.sync(() => { denied.add(hash) }))
@@ -130,9 +147,14 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
       const connection = yield* current
       if (!connection || !connectionKey(connection)) return { error: "Sign in to QwenCloud before refreshing the catalog." }
       const credential = yield* ctx.integration.connection.resolve(connection).pipe(Effect.catch(() => Effect.succeed(undefined)))
-      if (!credential || credential.type !== "oauth") return { error: "Qwen OAuth credentials unavailable; sign in again." }
-      if (!Number.isSafeInteger(credential.expires) || credential.expires <= Date.now()) { yield* invalidate(connection); return { error: "QwenCloud session expired; sign in again." } }
       if (connectionKey(connection) !== connectionKey(yield* active)) return { error: "Active Qwen connection changed; refresh again." }
+      const authState = observeManagement(connection, credential)
+      if (!credential || credential.type !== "oauth") return { error: "Qwen OAuth credentials unavailable; sign in again." }
+      if (authState === "unavailable") {
+        if (!Number.isSafeInteger(credential.expires) || credential.expires <= 0) yield* invalidate(connection)
+        return { error: "Qwen OAuth credentials unavailable; check the QwenCloud connection." }
+      }
+      if (authState === "expired") { yield* invalidate(connection); return { error: "QwenCloud session expired; sign in again." } }
       const outcome = yield* Effect.tryPromise({
         try: async signal => {
           const listing = await discoverCatalog(credential.access, dependencies.fetch, signal)
@@ -142,7 +164,10 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
       }).pipe(Effect.map(value => ({ ok: true as const, value })), Effect.catch(error => Effect.succeed({ ok: false as const, error })))
       if (connectionKey(connection) !== connectionKey(yield* active)) return { error: "Active Qwen connection changed; refresh again." }
       if (!outcome.ok) {
-        if (outcome.error.status === 403 || outcome.error.status === 401) yield* invalidate(connection)
+        if (outcome.error.status === 403 || outcome.error.status === 401) {
+          management = { connection: connectionKey(connection)!, state: "unauthorized" }
+          yield* invalidate(connection)
+        }
         if (outcome.error.transient && cached && connectionKey(cached.connection) === connectionKey(connection)) return { ...(yield* catalog), stale: true }
         return { error: outcome.error.message, ...(outcome.error.status ? { status: outcome.error.status } : {}) }
       }
@@ -158,14 +183,21 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
       return yield* catalog
     }).pipe(Effect.ensuring(Effect.sync(() => { refreshing = false })))
   })
-  const quota = Effect.gen(function* () {
+  const managementQuota = Effect.gen(function* () {
     const connection = yield* current
     if (!connection || !connectionKey(connection)) return yield* Effect.promise(() => getQwenCloudQuota())
     const credential = yield* ctx.integration.connection.resolve(connection).pipe(Effect.catch(() => Effect.succeed(undefined)))
-    if (connectionKey(connection) !== connectionKey(yield* active) || credential?.type !== "oauth" || credential.expires <= Date.now()) return yield* Effect.promise(() => getQwenCloudQuota())
+    const resolvedConnection = yield* active
+    if (connectionKey(connection) !== connectionKey(resolvedConnection)) return connectionKey(resolvedConnection) ? quotaFailure("account-changed") : yield* Effect.promise(() => getQwenCloudQuota())
+    const authState = observeManagement(connection, credential)
+    if (authState === "expired") return quotaFailure("session-expired")
+    if (authState === "unavailable" || credential?.type !== "oauth") return quotaFailure("credentials-unavailable")
     const result = yield* Effect.promise(signal => getQwenCloudQuota(credential.access, dependencies.fetch, signal))
-    if (connectionKey(connection) !== connectionKey(yield* active)) return yield* Effect.promise(() => getQwenCloudQuota())
+    const completedConnection = yield* active
+    if (connectionKey(connection) !== connectionKey(completedConnection)) return connectionKey(completedConnection) ? quotaFailure("account-changed") : yield* Effect.promise(() => getQwenCloudQuota())
+    if (result.diagnostics.some(d => d.code === "unauthorized")) management = { connection: connectionKey(connection)!, state: "unauthorized" }
     return result
   })
-  return { refresh, status, catalog, quota, handleEvent, synchronize: current.pipe(Effect.asVoid), bindings: (connection: ActiveConnection) => cached && connectionKey(cached.connection) === connectionKey(connection) ? cached.models : [] }
+  const quota = Effect.promise(signal => readAlibabaConsoleQuota({ runner: dependencies.quotaRunner, workspaceRoot: ctx.location?.directory }, signal))
+  return { refresh, status, catalog, quota, managementQuota, handleEvent, synchronize: current.pipe(Effect.asVoid), bindings: (connection: ActiveConnection) => cached && connectionKey(cached.connection) === connectionKey(connection) ? cached.models : [] }
 }

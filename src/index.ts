@@ -1,27 +1,30 @@
 import { Integration, Plugin, Provider } from "@opencode/plugin/effect"
 import { Effect, Stream } from "effect"
-import { authorizationStartError, beginLogin, METHOD_ID, requireReauthentication, type Login } from "./oauth.js"
+import { authorizationStartError, beginLogin, METHOD_ID, type Login } from "./oauth.js"
 import { randomUUID } from "node:crypto"
 import { CATALOG_CHANGED_EVENT, catalogRPC, connectionKey, createDiscovery, type ActiveConnection, type CatalogNotification } from "./discovery.js"
 import { nativeModel, type AccountModel } from "./inventory.js"
 import { API_BASE, DEFAULT_TIMEOUT_MS, KEY_INTEGRATION_ID } from "./transport.js"
+import { acquireQuotaBridge, parseQuotaBridge, type QuotaBridgeConfig } from "./quota-bridge-plugin.js"
 
 export const PROVIDER_ID = Provider.ID.make("qwencloud")
 export const INTEGRATION_ID = Integration.ID.make("qwencloud-oauth")
 export { catalogRPC } from "./discovery.js"
 export { KEY_INTEGRATION_ID } from "./transport.js"
 
-export function parseOptions(options: Record<string, unknown>): { timeoutMs: number } {
-  if (Object.keys(options).some(key => key !== "timeoutMs")) throw new Error("QwenCloud accepts only timeoutMs; gateway overrides, fabricated models and unsafe inference bypasses are unsupported.")
+export function parseOptions(options: Record<string, unknown>): { timeoutMs: number; quotaBridge?: QuotaBridgeConfig } {
+  if (Object.keys(options).some(key => key !== "timeoutMs" && key !== "quotaBridge")) throw new Error("QwenCloud accepts only timeoutMs and quotaBridge; gateway overrides, fabricated models and unsafe inference bypasses are unsupported.")
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1000 || Number(timeoutMs) > 600_000) throw new Error("Qwen timeoutMs must be between 1000 and 600000.")
-  return { timeoutMs: Number(timeoutMs) }
+  const quotaBridge = parseQuotaBridge(options.quotaBridge)
+  return { timeoutMs: Number(timeoutMs), ...(quotaBridge ? { quotaBridge } : {}) }
 }
 
 export default Plugin.define({
   id: "opencode-qwencloud-oauth",
   effect: ctx => Effect.gen(function* () {
     const options = parseOptions(ctx.options)
+    const quotaBridge = yield* acquireQuotaBridge(options.quotaBridge, { workspaceRoot: ctx.location?.directory })
     const storedID = yield* ctx.storage.get("device-client-id:v1")
     const clientID = typeof storedID === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(storedID) ? storedID : randomUUID()
     if (clientID !== storedID) yield* ctx.storage.set("device-client-id:v1", clientID)
@@ -54,7 +57,7 @@ export default Plugin.define({
       })
     })
     const registration = yield* ctx.rpc.register(catalogRPC, {
-      refresh: () => discovery.refresh, status: () => discovery.status, catalog: () => discovery.catalog, quota: () => discovery.quota,
+      refresh: () => discovery.refresh, status: () => discovery.status.pipe(Effect.map(status => ({ ...status, quotaBridge }))), catalog: () => discovery.catalog, quota: () => discovery.quota, managementQuota: () => discovery.managementQuota,
     }).pipe(Effect.orDie)
     notify = data => registration.events.emit("catalogUpdated", { ...data }).pipe(Effect.catch(() => Effect.void))
     yield* ctx.integration.transform(editor => {
@@ -71,7 +74,6 @@ export default Plugin.define({
             callback: Effect.tryPromise({ try: () => login.callback, catch: error => error }),
           }
         }),
-        refresh: () => Effect.tryPromise({ try: requireReauthentication, catch: error => error }),
       })
       editor.update(INTEGRATION_ID, integration => { integration.name = "QwenCloud" })
       editor.method.update({ integrationID: KEY_INTEGRATION_ID, method: { type: "key", label: "Store a separate inference API key (not verified)" } })

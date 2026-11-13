@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto"
+import { createHash, createHmac, timingSafeEqual } from "node:crypto"
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import type { Socket } from "node:net"
 import { toQwenCloudQuotaV1, type QwenCloudQuota } from "./quota.js"
@@ -9,11 +9,20 @@ export interface QuotaBridgeOptions {
   getQuota: (signal: AbortSignal) => Promise<QwenCloudQuota>
   signal?: AbortSignal
   requestTimeoutMs?: number
+  sharedHealth?: boolean
 }
 
 export interface QuotaBridge {
   url: string
   close(): Promise<void>
+}
+
+export function quotaBridgeProof(token: string, direction: "request" | "response", nonce: string): string {
+  return createHmac("sha256", token).update(`qwencloud-quota-bridge-v1:${direction}:${nonce}`).digest("hex")
+}
+
+export function validQuotaBridgeProof(token: string, direction: "request" | "response", nonce: string, proof: string): boolean {
+  return /^[a-f0-9]{64}$/.test(proof) && timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(quotaBridgeProof(token, direction, nonce), "hex"))
 }
 
 function headerCount(request: IncomingMessage, name: string): number {
@@ -62,6 +71,7 @@ export async function startQuotaBridge(options: QuotaBridgeOptions): Promise<Quo
   const active = new Set<AbortController>()
   let authority = ""
   let closing: Promise<void> | undefined
+  let healthWindow = 0, healthCount = 0
   const server = createServer({
     maxHeaderSize: 4_096,
     headersTimeout: 3_000,
@@ -91,10 +101,21 @@ export async function startQuotaBridge(options: QuotaBridgeOptions): Promise<Quo
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (closing) return reject(response, 503)
     if (request.method !== "GET") return reject(response, 405)
-    if (request.url !== "/quota") return reject(response, 404)
+    const health = options.sharedHealth && request.url === "/quota-bridge-health"
+    if (request.url !== "/quota" && !health) return reject(response, 404)
     if (request.socket.remoteAddress !== "127.0.0.1" || request.headers.host !== authority || headerCount(request, "host") !== 1) return reject(response, 400)
     if (request.headers.origin !== undefined) return reject(response, 403)
     if (request.headers["transfer-encoding"] !== undefined || (request.headers["content-length"] !== undefined && request.headers["content-length"] !== "0")) return reject(response, 400)
+    if (health) {
+      if (Date.now() - healthWindow >= 1000) { healthWindow = Date.now(); healthCount = 0 }
+      if (++healthCount > 32) return reject(response, 429)
+      const nonce = request.headers["x-qwencloud-nonce"], proof = request.headers["x-qwencloud-proof"]
+      const challenge = `${authority.slice("127.0.0.1:".length)}:${nonce}`
+      if (request.headers.authorization !== undefined || typeof nonce !== "string" || !/^[a-f0-9]{64}$/.test(nonce) || typeof proof !== "string" || headerCount(request, "x-qwencloud-nonce") !== 1 || headerCount(request, "x-qwencloud-proof") !== 1 || !validQuotaBridgeProof(options.token, "request", challenge, proof)) return reject(response, 401)
+      response.writeHead(204, { "X-Qwencloud-Protocol": "1", "X-Qwencloud-Proof": quotaBridgeProof(options.token, "response", challenge), "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'", Connection: "close" })
+      response.end()
+      return
+    }
     const authorization = request.headers.authorization
     if (typeof authorization !== "string" || authorization.length > 519 || headerCount(request, "authorization") !== 1 || !timingSafeEqual(createHash("sha256").update(authorization).digest(), expectedAuth)) return reject(response, 401)
     const controller = new AbortController()

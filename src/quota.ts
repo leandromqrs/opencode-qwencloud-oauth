@@ -3,12 +3,12 @@ const MAX_BYTES = 262_144
 const MAX_BALANCES = 32
 const TIMEOUT_MS = 10_000
 const DECIMAL = /^\d+(?:\.\d+)?$/
-const actions = ["quota", "QuerySubscriptionGray", "GetSeatSubscriptionSummary", "DescribeFrInstances"] as const
+const actions = ["quota", "AlibabaTokenPlanUsage", "QuerySubscriptionGray", "GetSeatSubscriptionSummary", "DescribeFrInstances"] as const
 const states = ["disconnected", "ready", "partial", "error", "unknown"] as const
 const kinds = ["personal", "team", "addon"] as const
 const scopes = ["personal", "team-aggregate", "unknown"] as const
 const statuses = ["valid", "exhaust", "expire", "unknown"] as const
-const codes = ["invalid-credentials", "cancelled", "timeout", "unauthorized", "rate-limited", "http-error", "network-error", "body-too-large", "invalid-response", "business-error", "truncated", "invalid-amount", "invalid-reset", "inconsistent-balance", "missing-balance"] as const
+const codes = ["invalid-credentials", "session-expired", "credentials-unavailable", "account-changed", "cancelled", "timeout", "unauthorized", "rate-limited", "http-error", "network-error", "body-too-large", "invalid-response", "business-error", "truncated", "invalid-amount", "invalid-reset", "inconsistent-balance", "missing-balance", "cli-not-found", "cli-unsupported", "cli-failed"] as const
 
 export interface QwenCloudQuotaBalance {
   id: string
@@ -27,12 +27,21 @@ export interface QwenCloudQuotaDiagnostic {
   code: typeof codes[number]
 }
 
+export interface QwenCloudPersonalWindow {
+  period: "monthly"
+  scope: "personal"
+  usedFraction: number
+  resetAt?: string
+}
+
 export interface QwenCloudQuota {
   state: typeof states[number]
-  source: "qwencloud-token-plan"
+  source: "qwencloud-token-plan" | "alibaba-console-cli"
+  accountBinding?: "unverified"
   observedAt: string
   balances: QwenCloudQuotaBalance[]
   diagnostics: QwenCloudQuotaDiagnostic[]
+  personalWindows?: QwenCloudPersonalWindow[]
 }
 
 // Native RPC imports reject patterns; readQwenCloudQuota enforces exact lexical rules.
@@ -42,7 +51,15 @@ export const qwenCloudQuotaSchema = {
   type: "object", additionalProperties: false,
   required: ["state", "source", "observedAt", "balances", "diagnostics"],
   properties: {
-    state: { enum: states }, source: { const: "qwencloud-token-plan" }, observedAt: timeSchema,
+    state: { enum: states }, source: { enum: ["qwencloud-token-plan", "alibaba-console-cli"] }, observedAt: timeSchema,
+    accountBinding: { const: "unverified" },
+    personalWindows: { type: "array", maxItems: 1, items: {
+      type: "object", additionalProperties: false, required: ["period", "scope", "usedFraction"],
+      properties: {
+        period: { const: "monthly" }, scope: { const: "personal" },
+        usedFraction: { type: "number", minimum: 0, maximum: 1 }, resetAt: timeSchema,
+      },
+    } },
     balances: { type: "array", maxItems: MAX_BALANCES, items: {
       type: "object", additionalProperties: false,
       required: ["id", "kind", "scope", "status", "unit", "action"],
@@ -96,7 +113,15 @@ function onlyKeys(value: Record<string, unknown>, allowed: string[]): boolean {
 export function readQwenCloudQuota(value: unknown): QwenCloudQuota {
   try {
     const data = record(value)
-    if (!onlyKeys(data, ["state", "source", "observedAt", "balances", "diagnostics"]) || !states.includes(data.state as QwenCloudQuota["state"]) || data.source !== "qwencloud-token-plan" || typeof data.observedAt !== "string" || iso(data.observedAt) !== data.observedAt || !Array.isArray(data.balances) || data.balances.length > MAX_BALANCES || !Array.isArray(data.diagnostics) || data.diagnostics.length > 32) throw new Error()
+    if (!onlyKeys(data, ["state", "source", "observedAt", "balances", "diagnostics", "personalWindows", "accountBinding"]) || !states.includes(data.state as QwenCloudQuota["state"]) || !["qwencloud-token-plan", "alibaba-console-cli"].includes(data.source as string) || typeof data.observedAt !== "string" || iso(data.observedAt) !== data.observedAt || !Array.isArray(data.balances) || data.balances.length > MAX_BALANCES || !Array.isArray(data.diagnostics) || data.diagnostics.length > 32) throw new Error()
+    const cli = data.source === "alibaba-console-cli"
+    if (cli ? data.accountBinding !== "unverified" || data.balances.length > 0 : "accountBinding" in data || "personalWindows" in data) throw new Error()
+    if ("personalWindows" in data && (!Array.isArray(data.personalWindows) || data.personalWindows.length > 1)) throw new Error()
+    const personalWindows = (data.personalWindows as unknown[] | undefined)?.map(raw => {
+      const window = record(raw)
+      if (!onlyKeys(window, ["period", "scope", "usedFraction", "resetAt"]) || window.period !== "monthly" || window.scope !== "personal" || typeof window.usedFraction !== "number" || !Number.isFinite(window.usedFraction) || window.usedFraction < 0 || window.usedFraction > 1 || ("resetAt" in window && (typeof window.resetAt !== "string" || iso(window.resetAt) !== window.resetAt))) throw new Error()
+      return { ...window } as unknown as QwenCloudPersonalWindow
+    })
     const ids = new Set<string>()
     const balances = data.balances.map(raw => {
       const b = record(raw)
@@ -110,11 +135,12 @@ export function readQwenCloudQuota(value: unknown): QwenCloudQuota {
     const diagnostics = data.diagnostics.map(raw => {
       const d = record(raw)
       if (!onlyKeys(d, ["action", "code"]) || !actions.includes(d.action as QwenCloudQuotaDiagnostic["action"]) || !codes.includes(d.code as QwenCloudQuotaDiagnostic["code"])) throw new Error()
+      if (cli !== (d.action === "AlibabaTokenPlanUsage")) throw new Error()
       return { ...d } as unknown as QwenCloudQuotaDiagnostic
     })
-    const hasAmounts = balances.some(b => b.total !== undefined || b.remaining !== undefined)
-    if ((data.state === "ready" && (!hasAmounts || diagnostics.length)) || (data.state === "partial" && (!hasAmounts || !diagnostics.length)) || ((data.state === "disconnected" || data.state === "error") && balances.length) || (data.state === "unknown" && hasAmounts) || (data.state === "error" && !diagnostics.length)) throw new Error()
-    return { state: data.state as QwenCloudQuota["state"], source: "qwencloud-token-plan", observedAt: data.observedAt as string, balances, diagnostics }
+    const measured = balances.some(b => b.total !== undefined || b.remaining !== undefined) || !!personalWindows?.length
+    if ((data.state === "ready" && (!measured || diagnostics.length)) || (data.state === "partial" && (!measured || !diagnostics.length)) || ((data.state === "disconnected" || data.state === "error") && (balances.length || personalWindows?.length)) || (data.state === "unknown" && measured) || (data.state === "error" && !diagnostics.length)) throw new Error()
+    return { state: data.state as QwenCloudQuota["state"], source: data.source as QwenCloudQuota["source"], observedAt: data.observedAt as string, balances, diagnostics, ...(cli ? { accountBinding: "unverified" as const } : {}), ...(personalWindows ? { personalWindows } : {}) }
   } catch { throw new Error("Invalid QwenCloud quota response.") }
 }
 
@@ -295,6 +321,11 @@ export interface QwenCloudQuotaV1Entry {
 export function toQwenCloudQuotaV1(value: QwenCloudQuota): { version: "quota-v1"; entries: QwenCloudQuotaV1Entry[] } {
   const quota = readQwenCloudQuota(value)
   const entries: QwenCloudQuotaV1Entry[] = []
+  for (const window of quota.personalWindows ?? []) entries.push({
+    kind: "percent", name: "alibaba-console-personal-monthly", label: "Alibaba console Token Plan monthly remaining (account unverified)", resultType: "quota",
+    percentRemaining: 100 - window.usedFraction * 100, observedAtIso: quota.observedAt,
+    ...(window.resetAt ? { resetTimeIso: window.resetAt } : {}),
+  })
   for (const b of quota.balances) {
     const label = b.kind === "personal" ? "Personal Token Plan" : b.kind === "team" ? "Team aggregate Token Plan" : "Addon scope unknown"
     const metadata = { observedAtIso: quota.observedAt, ...(b.resetAt ? { resetTimeIso: b.resetAt } : {}) }
@@ -308,9 +339,15 @@ export function toQwenCloudQuotaV1(value: QwenCloudQuota): { version: "quota-v1"
     const percent = b.total !== undefined && b.remaining !== undefined ? percentage(b.total, b.remaining) : undefined
     if (percent !== undefined) entries.push({ ...metadata, kind: "percent", name: `${b.id}-percent`, label: `${label} remaining${suffix}`, resultType: "quota", percentRemaining: percent })
   }
+  const cli = quota.source === "alibaba-console-cli"
+  const authStatus = cli ? quota.diagnostics.some(d => d.code === "unauthorized") ? "Alibaba console login required; run bl auth login --console" : quota.diagnostics.some(d => d.code === "cli-not-found") ? "Official Alibaba CLI (bl) not found on trusted PATH" : undefined
+    : quota.diagnostics.some(d => d.code === "session-expired") ? "Management session expired; sign in to QwenCloud again"
+    : quota.diagnostics.some(d => d.code === "credentials-unavailable") ? "Management credentials unavailable; check the QwenCloud connection"
+    : quota.diagnostics.some(d => d.code === "account-changed") ? "Active QwenCloud connection changed; retry quota"
+    : quota.diagnostics.some(d => d.code === "unauthorized") ? "Management authorization rejected; check the QwenCloud connection" : undefined
   if (quota.state !== "ready" || !entries.length) entries.push({
-    kind: "value", name: "status", label: "QwenCloud Token Plan", resultType: "status", observedAtIso: quota.observedAt,
-    value: quota.state === "disconnected" ? "Not signed in" : quota.state === "partial" ? "Partial quota data; some reads failed or were incomplete" : quota.state === "error" ? "Quota read failed" : "No Token Plan balance observed",
+    kind: "value", name: "status", label: cli ? "Alibaba console Token Plan (account unverified)" : "QwenCloud Token Plan", resultType: "status", observedAtIso: quota.observedAt,
+    value: quota.state === "disconnected" ? "Not signed in" : quota.state === "partial" ? "Partial quota data; some reads failed or were incomplete" : authStatus ?? (quota.state === "error" ? "Quota read failed" : "No Token Plan balance observed"),
   })
   return { version: "quota-v1", entries }
 }

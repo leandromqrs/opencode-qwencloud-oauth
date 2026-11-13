@@ -102,7 +102,8 @@ test("native quota schema compiles without regex and strict reader retains lexic
   const decode = Schema.decodeUnknownSync(schema as Schema.Codec<unknown>)
   const ready = await getQwenCloudQuota(token, legacy())
   const team = { ...ready, balances: [{ ...ready.balances[0], id: "team-1", kind: "team", scope: "team-aggregate", action: "GetSeatSubscriptionSummary", resetAt: "2030-01-01T00:00:00.000Z" }] }
-  for (const quota of [await getQwenCloudQuota(), ready, team]) {
+  const expired = { ...ready, state: "error", balances: [], diagnostics: [{ action: "quota", code: "session-expired" }] }
+  for (const quota of [await getQwenCloudQuota(), ready, team, expired]) {
     assert.deepEqual(decode(quota), quota)
     assert.deepEqual(readQwenCloudQuota(quota), quota)
   }
@@ -126,6 +127,20 @@ test("missing data is unknown, never zero or not subscribed", async () => {
   assert.equal(missing.state, "unknown")
   assert.equal(missing.balances[0].remaining, undefined)
   assert.ok(toQwenCloudQuotaV1(missing).entries.every(row => row.kind !== "percent"))
+})
+
+test("quota status distinguishes required reauthentication from credential and account races", () => {
+  const base = { state: "error", source: "qwencloud-token-plan", observedAt: "2030-01-01T00:00:00.000Z", balances: [] } as const
+  for (const [code, message] of [
+    ["session-expired", "Management session expired; sign in to QwenCloud again"],
+    ["credentials-unavailable", "Management credentials unavailable; check the QwenCloud connection"],
+    ["account-changed", "Active QwenCloud connection changed; retry quota"],
+    ["unauthorized", "Management authorization rejected; check the QwenCloud connection"],
+  ] as const) {
+    const quota = readQwenCloudQuota({ ...base, diagnostics: [{ action: "quota", code }] })
+    assert.equal(toQwenCloudQuotaV1(quota).entries[0].value, message)
+    assert.equal(toQwenCloudQuotaV1(quota).entries[0].resultType, "status")
+  }
 })
 
 test("partial failures and pagination are explicit, business failures cannot become absence", async () => {

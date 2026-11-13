@@ -1,10 +1,53 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { Effect } from "effect"
+import { Effect, Schema, SchemaRepresentation } from "effect"
 import { CATALOG_CHANGED_EVENT, createDiscovery, type ActiveConnection } from "../src/discovery.js"
 import { fixtureContext, memoryStorage } from "./discovery-support.js"
+import { catalogRPC } from "../src/discovery.js"
+import { readQwenCloudQuota, toQwenCloudQuotaV1 } from "../src/quota.js"
 
 const listing = (...ids: string[]) => ({ code: "200", data: { Data: [{ Items: ids.map(Model => ({ Model })) }] } })
+
+test("native quota is a fresh independently authenticated CLI read, not an OAuth-bound cache or startup command", async () => {
+  const storage = memoryStorage()
+  const fixture = fixtureContext(storage.storage)
+  let calls = 0
+  const discovery = createDiscovery(fixture.ctx, () => Effect.void, undefined, {
+    quotaRunner: async signal => {
+      assert.equal(signal.aborted, false)
+      calls++
+      return { ok: true, stdout: JSON.stringify({ per1MonthPercentage: calls === 1 ? 0.5715795927593333 : 0, per1MonthResetTime: 1794672000000, account: "PRIVATE" }) }
+    },
+    fetch: async () => { throw new Error("CLI quota must not make management requests") },
+  })
+  await Effect.runPromise(discovery.synchronize)
+  await Effect.runPromise(discovery.status)
+  await Effect.runPromise(discovery.catalog)
+  assert.equal(calls, 0)
+  const before = [...storage.values.entries()]
+  fixture.setConnection(undefined)
+  const result = await Effect.runPromise(discovery.quota)
+  const document = JSON.parse(JSON.stringify(result))
+  const schema = SchemaRepresentation.fromJsonSchemaDocument({ dialect: "draft-2020-12", schema: catalogRPC.methods.quota.output, definitions: {} })
+  assert.deepEqual(Schema.decodeUnknownSync(schema as Schema.Codec<unknown>)(document), result)
+  assert.deepEqual(readQwenCloudQuota(document), result)
+  assert.equal(result.state, "ready")
+  assert.equal(result.source, "alibaba-console-cli")
+  assert.equal(result.accountBinding, "unverified")
+  assert.deepEqual(result.balances, [])
+  assert.equal(toQwenCloudQuotaV1(result).entries[0].percentRemaining, 100 - 0.5715795927593333 * 100)
+  assert.equal((await Effect.runPromise(discovery.status)).management, "not-connected")
+  const second = await Effect.runPromise(discovery.quota)
+  assert.equal(second.personalWindows?.[0].usedFraction, 0)
+  assert.equal(calls, 2)
+  fixture.setConnection({ type: "credential", id: "expired-management" as never, method: "oauth", label: "PRIVATE" })
+  fixture.setExpiry(1)
+  assert.equal((await Effect.runPromise(discovery.quota)).state, "ready")
+  assert.equal(calls, 3)
+  assert.equal(fixture.resolves(), 0)
+  assert.deepEqual([...storage.values.entries()], before)
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|fixture-access|fixture-refresh/)
+})
 
 test("separate native key metadata never binds an OAuth catalog to the key owner", async () => {
   const fixture = fixtureContext()
@@ -199,8 +242,97 @@ test("expired management sessions invalidate catalog and never send expired cred
   fixture.setExpiry(1)
   assert.match(String((await Effect.runPromise(discovery.refresh) as { error: string }).error), /expired.*sign in/i)
   assert.equal((await Effect.runPromise(discovery.catalog)).supported.length, 0)
-  assert.equal((await Effect.runPromise(discovery.quota)).state, "disconnected")
+  assert.equal((await Effect.runPromise(discovery.status)).management, "expired")
+  const quota = await Effect.runPromise(discovery.managementQuota)
+  assert.equal(quota.state, "error")
+  assert.deepEqual(quota.diagnostics, [{ action: "quota", code: "session-expired" }])
+  const status = await Effect.runPromise(discovery.status)
+  assert.equal(status.connected, true)
+  assert.equal(status.management, "expired")
   assert.equal(calls, 1)
+})
+
+test("quota distinguishes absent connections from unavailable or invalid management credentials", async () => {
+  for (const expires of [1, NaN, Infinity]) {
+    const fixture = fixtureContext()
+    fixture.setExpiry(expires)
+    let calls = 0
+    const discovery = createDiscovery(fixture.ctx, () => Effect.void, undefined, { fetch: async () => { calls++; throw new Error("PRIVATE") } })
+    const status = await Effect.runPromise(discovery.status)
+    assert.equal(status.management, "stored-unverified")
+    assert.equal(fixture.resolves(), 0)
+    const quota = await Effect.runPromise(discovery.managementQuota)
+    assert.equal(quota.state, "error")
+    assert.deepEqual(quota.balances, [])
+    assert.deepEqual(quota.diagnostics, [{ action: "quota", code: expires === 1 ? "session-expired" : "credentials-unavailable" }])
+    assert.equal(calls, 0)
+  }
+  for (const resolve of [() => Effect.succeed(undefined), () => Effect.fail(new Error("PRIVATE"))]) {
+    const fixture = fixtureContext()
+    Object.assign(fixture.ctx.integration.connection, { resolve })
+    const discovery = createDiscovery(fixture.ctx, () => Effect.void)
+    const quota = await Effect.runPromise(discovery.managementQuota)
+    assert.equal(quota.state, "error")
+    assert.deepEqual(quota.diagnostics, [{ action: "quota", code: "credentials-unavailable" }])
+    assert.equal((await Effect.runPromise(discovery.status)).management, "unavailable")
+    assert.doesNotMatch(JSON.stringify(quota), /PRIVATE/)
+    fixture.setConnection(undefined)
+    assert.equal((await Effect.runPromise(discovery.managementQuota)).state, "disconnected")
+    assert.equal((await Effect.runPromise(discovery.status)).management, "not-connected")
+  }
+})
+
+test("management auth observations remain account bound and are cleared by credential updates", async () => {
+  const fixture = fixtureContext()
+  fixture.setExpiry(1)
+  const discovery = createDiscovery(fixture.ctx, () => Effect.void)
+  await Effect.runPromise(discovery.managementQuota)
+  assert.equal((await Effect.runPromise(discovery.status)).management, "expired")
+  await Effect.runPromise(discovery.handleEvent({ type: "integration.updated", data: {} }))
+  assert.equal((await Effect.runPromise(discovery.status)).management, "expired")
+  await Effect.runPromise(discovery.handleEvent({ type: "credential.switched", data: { integrationID: "qwencloud-api-key" } }))
+  assert.equal((await Effect.runPromise(discovery.status)).management, "expired")
+  fixture.setConnection({ type: "credential", id: "other-account" as never, method: "oauth", label: "PRIVATE" })
+  assert.equal((await Effect.runPromise(discovery.status)).management, "stored-unverified")
+  await Effect.runPromise(discovery.managementQuota)
+  await Effect.runPromise(discovery.handleEvent({ type: "credential.updated" }))
+  assert.equal((await Effect.runPromise(discovery.status)).management, "stored-unverified")
+})
+
+test("quota discards another account's response without labeling the new account expired", async () => {
+  const fixture = fixtureContext()
+  const discovery = createDiscovery(fixture.ctx, () => Effect.void, undefined, { fetch: async () => {
+    fixture.setConnection({ type: "credential", id: "other-account" as never, method: "oauth", label: "PRIVATE" })
+    return Response.json({ code: "200", data: { IsGray: false } })
+  } })
+  const quota = await Effect.runPromise(discovery.managementQuota)
+  assert.equal(quota.state, "error")
+  assert.deepEqual(quota.balances, [])
+  assert.deepEqual(quota.diagnostics, [{ action: "quota", code: "account-changed" }])
+  assert.equal((await Effect.runPromise(discovery.status)).management, "stored-unverified")
+})
+
+test("explicit quota learns authorization rejection without claiming expiry or resolving on status", async () => {
+  const fixture = fixtureContext()
+  const discovery = createDiscovery(fixture.ctx, () => Effect.void, undefined, { fetch: async () => Response.json({}, { status: 401 }) })
+  const quota = await Effect.runPromise(discovery.managementQuota)
+  assert.equal(quota.state, "error")
+  assert.deepEqual(quota.diagnostics, [{ action: "QuerySubscriptionGray", code: "unauthorized" }])
+  const resolves = fixture.resolves()
+  assert.equal((await Effect.runPromise(discovery.status)).management, "unauthorized")
+  assert.equal(fixture.resolves(), resolves)
+})
+
+test("quota discards expired credentials resolved while the active account changes", async () => {
+  const fixture = fixtureContext()
+  Object.assign(fixture.ctx.integration.connection, { resolve: () => Effect.sync(() => {
+    fixture.setConnection({ type: "credential", id: "other-account" as never, method: "oauth", label: "PRIVATE" })
+    return { type: "oauth", access: "PRIVATE", refresh: "", expires: 1 }
+  }) })
+  const discovery = createDiscovery(fixture.ctx, () => Effect.void)
+  const quota = await Effect.runPromise(discovery.managementQuota)
+  assert.deepEqual(quota.diagnostics, [{ action: "quota", code: "account-changed" }])
+  assert.equal((await Effect.runPromise(discovery.status)).management, "stored-unverified")
 })
 
 test("quota resolves only on explicit RPC, passes cancellation, and discards switched-account results", async () => {
@@ -217,7 +349,7 @@ test("quota resolves only on explicit RPC, passes cancellation, and discards swi
   await Effect.runPromise(discovery.status)
   assert.equal(fixture.resolves(), 0)
   assert.equal(calls, 0)
-  const result = await Effect.runPromise(discovery.quota)
+  const result = await Effect.runPromise(discovery.managementQuota)
   assert.equal(result.state, "disconnected")
   assert.equal(fixture.resolves(), 1)
   assert.ok(calls > 0)
