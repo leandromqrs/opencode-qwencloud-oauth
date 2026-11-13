@@ -83,7 +83,7 @@ export default Plugin.define({
       yield* discovery.synchronize
       const connection = yield* ctx.integration.connection.active(INTEGRATION_ID)
       if (!connection || !discovered || connectionKey(connection) !== connectionKey(discovered.connection) || !discovery.bindings(connection).some(model => model.id === event.model.id)) {
-        return yield* Effect.die(new Error("QwenCloud model is not in the active management catalog. Sign in and refresh the catalog."))
+        return yield* Effect.die(new Error("QwenCloud model is not in the active account-bound catalog. Sign in and refresh the catalog."))
       }
     }), { providerID: PROVIDER_ID })
     yield* ctx.session.hook("retry", event => Effect.sync(() => { event.decision = { retry: false } }), { providerID: PROVIDER_ID })

@@ -9,8 +9,8 @@ test("opaque API keys permit printable punctuation but reject header injection a
   for (const value of ["sk-sp-foo\r\nInjected: yes", "sk-sp-foo bar", "sk-sp-\u0000", "sk-" + "a".repeat(32766), undefined]) assert.equal(isInferenceKey(value), false)
 })
 
-test("explicit inference plan pins the same service endpoints as the official CLI", () => {
-  assert.equal(inferenceBase({ plan: "token-plan" }), "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1")
+test("explicit inference plan pins the documented Token Plan endpoint separately from PAYG", () => {
+  assert.equal(inferenceBase({ plan: "token-plan" }), "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1")
   assert.equal(inferenceBase({ plan: "payg", region: "ap-southeast-1" }), "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
 })
 
@@ -21,7 +21,7 @@ test("isolated API-key transport pins plan and preserves chat payload without in
   assert.equal(lowered.redirect, "error")
   assert.equal(lowered.headers.get("authorization"), "Bearer sk-sp-fixture")
   assert.deepEqual(await lowered.json(), body)
-  for (const url of ["https://evil.test/chat/completions", `${API_BASE}/responses`, `${API_BASE}/chat/completions?leak=1`]) await assert.rejects(prepareRequest(new Request(url, { method: "POST", body: "{}" }), "sk-sp-fixture", [], { plan: "token-plan" }), /destination/)
+  for (const url of ["https://evil.test/chat/completions", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions", `${API_BASE}/responses`, `${API_BASE}/chat/completions?leak=1`]) await assert.rejects(prepareRequest(new Request(url, { method: "POST", body: "{}" }), "sk-sp-fixture", [], { plan: "token-plan" }), /destination/)
 })
 
 test("management tokens and cross-plan fallback are rejected", async () => {
@@ -32,4 +32,17 @@ test("management tokens and cross-plan fallback are rejected", async () => {
 
 test("missing inference key directs manual creation without resolving OAuth or attempting fallback", async () => {
   await assert.rejects(prepareRequest(new Request(`${API_BASE}/chat/completions`, { method: "POST", body: "{}" }), "", [], { plan: "token-plan" }), /https:\/\/home\.qwencloud\.com\/api-keys/)
+})
+
+test("auto rejects documented unsupported controls without dropping or changing other model payloads", async () => {
+  for (const extra of [{ tool_choice: "auto" }, { thinking_budget: 0 }, { tool_choice: null }, { thinking_budget: null }]) {
+    const request = (model: string) => new Request(`${API_BASE}/chat/completions`, { method: "POST", body: JSON.stringify({ model, messages: [], ...extra }) })
+    await assert.rejects(prepareRequest(request("auto"), "sk-sp-fixture", ["auto"], { plan: "token-plan" }), /auto does not support tool_choice or thinking_budget/)
+    const preserved = await prepareRequest(request("catalog-model"), "sk-sp-fixture", ["catalog-model"], { plan: "token-plan" })
+    assert.deepEqual(await preserved.json(), { model: "catalog-model", messages: [], ...extra })
+  }
+  const body = { model: "auto", messages: [], stream: true }
+  const request = new Request(`${API_BASE}/chat/completions`, { method: "POST", body: JSON.stringify(body) })
+  assert.deepEqual(await (await prepareRequest(request, "sk-sp-fixture", ["auto"], { plan: "token-plan" })).json(), body)
+  await assert.rejects(prepareRequest(new Request(`${API_BASE}/chat/completions`, { method: "POST", body: JSON.stringify(body) }), "sk-sp-fixture", [], { plan: "token-plan" }), /active catalog/)
 })

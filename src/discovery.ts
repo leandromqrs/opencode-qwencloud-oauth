@@ -7,6 +7,7 @@ import { AUTH_ORIGIN, object, type Fetch } from "./oauth.js"
 import { API_BASE, KEY_INTEGRATION_ID } from "./transport.js"
 import { getQwenCloudQuota, qwenCloudQuotaSchema, type QwenCloudQuota } from "./quota.js"
 import { readAlibabaConsoleQuota, type QuotaCliRunner } from "./quota-cli.js"
+import { supplementTokenPlan, TOKEN_PLAN_SUPPORT } from "./token-plan.js"
 
 export const CATALOG_CHANGED_EVENT = "rpc.qwencloud.catalogUpdated"
 const VERSION = 2
@@ -45,7 +46,8 @@ function snapshot(connection: ActiveConnection, value: Snapshot) {
 }
 
 /** Account-bound metadata and explicit management reads; published models do not establish inference entitlement. */
-export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountModel[], connection: ActiveConnection) => Effect.Effect<void>, notify: (data: CatalogNotification) => Effect.Effect<void> = () => Effect.void, dependencies: { fetch?: Fetch; quotaRunner?: QuotaCliRunner } = {}) {
+export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountModel[], connection: ActiveConnection) => Effect.Effect<void>, notify: (data: CatalogNotification) => Effect.Effect<void> = () => Effect.void, dependencies: { fetch?: Fetch; quotaRunner?: QuotaCliRunner; now?: () => number } = {}) {
+  const supportedModels = (catalog: Catalog) => supplementTokenPlan(reconcileCatalog(catalog), (dependencies.now ?? Date.now)())
   let cached: { connection: ActiveConnection; snapshot: Snapshot; models: AccountModel[] } | undefined
   let refreshing = false
   let storageState: "available" | "invalid" | "unavailable" = "available"
@@ -75,9 +77,12 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
         const restored = loaded.ok && !denied.has(accountHash(connection)) ? restore(loaded.value, connection) : undefined
         if (loaded.ok && loaded.value !== undefined && !restored && !tombstone) storageState = "invalid"
         if (!restored) cached = undefined
-        else if (!cached || JSON.stringify(cached.snapshot) !== JSON.stringify(restored)) {
-          const source = { type: "credential" as const, id: connection.type === "credential" ? connection.id : "" as never, method: "oauth" as const, label: "QwenCloud connection" }
-          cached = { connection: source, snapshot: restored, models: reconcileCatalog(restored.catalog) }
+        else {
+          const models = supportedModels(restored.catalog)
+          if (!cached || JSON.stringify(cached.snapshot) !== JSON.stringify(restored) || JSON.stringify(cached.models) !== JSON.stringify(models)) {
+            const source = { type: "credential" as const, id: connection.type === "credential" ? connection.id : "" as never, method: "oauth" as const, label: "QwenCloud connection" }
+            cached = { connection: source, snapshot: restored, models }
+          }
         }
       }
       return { connection, changed: old !== cached, previous: old?.connection }
@@ -113,8 +118,9 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
     const { inference } = yield* status
     return {
       metadataSource: METADATA_SOURCE,
-      limitSource: "QwenCloud management catalog ModelInfo; missing limits unknown (native zero sentinel).",
-      capabilitySource: "QwenCloud InferenceMetadata modalities; exact Qwen effort variants from official documentation; tool support unknown.",
+      tokenPlanSupport: TOKEN_PLAN_SUPPORT,
+      limitSource: "QwenCloud management catalog ModelInfo; documentation-only entries and missing limits unknown (native zero sentinel).",
+      capabilitySource: "QwenCloud InferenceMetadata modalities; exact Qwen effort variants from official documentation; documentation-only modalities and tool support unknown.",
       pricing: "QwenCloud management catalog reference tariffs using CLI display order and explicit-cache precedence; absent cache rates estimated at ordinary input; not actual Token Plan cash charges.", entitlement: "unverified",
       accountListed: cached?.snapshot.catalog ?? null,
       supported: cached?.models ?? [], inference,
@@ -199,5 +205,5 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
     return result
   })
   const quota = Effect.promise(signal => readAlibabaConsoleQuota({ runner: dependencies.quotaRunner, workspaceRoot: ctx.location?.directory }, signal))
-  return { refresh, status, catalog, quota, managementQuota, handleEvent, synchronize: current.pipe(Effect.asVoid), bindings: (connection: ActiveConnection) => cached && connectionKey(cached.connection) === connectionKey(connection) ? cached.models : [] }
+  return { refresh, status, catalog, quota, managementQuota, handleEvent, synchronize: current.pipe(Effect.asVoid), bindings: (connection: ActiveConnection) => cached && connectionKey(cached.connection) === connectionKey(connection) ? supportedModels(cached.snapshot.catalog) : [] }
 }

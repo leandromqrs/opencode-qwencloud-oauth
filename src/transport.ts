@@ -1,4 +1,4 @@
-export const API_BASE = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+export const API_BASE = "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1"
 export const KEY_INTEGRATION_ID = "qwencloud-api-key"
 export const DEFAULT_TIMEOUT_MS = 600_000
 
@@ -30,6 +30,7 @@ export async function prepareRequest(request: Request, apiKey: string, allowedMo
     body = value as Record<string, unknown>
   } catch { throw new Error("Invalid QwenCloud request body.") }
   if (typeof body.model !== "string" || !allowedModels.includes(body.model)) throw new Error("QwenCloud model is not in the active catalog.")
+  if (body.model === "auto" && (Object.hasOwn(body, "tool_choice") || Object.hasOwn(body, "thinking_budget"))) throw new Error("QwenCloud auto does not support tool_choice or thinking_budget.")
   const headers = new Headers({ Accept: "application/json", "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` })
   return new Request(`${base}/chat/completions`, { method: "POST", headers, body: JSON.stringify(body), redirect: "error", signal: signal ?? AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)]) })
 }

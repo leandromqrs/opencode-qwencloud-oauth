@@ -1,12 +1,13 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { Effect, Schema, SchemaRepresentation } from "effect"
-import { CATALOG_CHANGED_EVENT, createDiscovery, type ActiveConnection } from "../src/discovery.js"
+import { CATALOG_CHANGED_EVENT, createDiscovery as createAccountDiscovery, type ActiveConnection } from "../src/discovery.js"
 import { fixtureContext, memoryStorage } from "./discovery-support.js"
 import { catalogRPC } from "../src/discovery.js"
 import { readQwenCloudQuota, toQwenCloudQuotaV1 } from "../src/quota.js"
 
 const listing = (...ids: string[]) => ({ code: "200", data: { Data: [{ Items: ids.map(Model => ({ Model })) }] } })
+const createDiscovery = (...args: Parameters<typeof createAccountDiscovery>) => createAccountDiscovery(args[0], args[1], args[2], { now: () => Date.parse("2026-11-10T00:00:00Z"), ...args[3] })
 
 test("native quota is a fresh independently authenticated CLI read, not an OAuth-bound cache or startup command", async () => {
   const storage = memoryStorage()

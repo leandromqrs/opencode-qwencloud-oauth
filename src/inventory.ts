@@ -5,7 +5,7 @@ import { nativeCosts, type PricingMetadata } from "./pricing.js"
 
 export const METADATA_SOURCE = "https://github.com/QwenCloud/qwencloud-cli/blob/264999e87d2fe819a9c570a9f3cbc1c9864a5163/src/types/api-models.ts"
 export type QwenEffort = "none" | "low" | "medium" | "xhigh"
-export interface AccountModel { id: string; context: number | null; inputLimit: number | null; output: number | null; inputModalities: Modality[] | null; outputModalities: Modality[] | null; pricing?: PricingMetadata; efforts: QwenEffort[]; metadata: "management-catalog" }
+export interface AccountModel { id: string; context: number | null; inputLimit: number | null; output: number | null; inputModalities: Modality[] | null; outputModalities: Modality[] | null; pricing?: PricingMetadata; efforts: QwenEffort[]; metadata: "management-catalog" | "token-plan-documentation"; provenance?: { sources: readonly string[]; reviewedAt: string; validFrom: string; validUntil: string } }
 
 const effortModelIDs = new Set(["qwen4-max-preview", "qwen4.0-max-preview", "qwen3.8-max", "qwen3.8-max-0902", "qwen3.8-flash", "qwen3.8-2.4t-a95b", "qwen3.8-27b"])
 

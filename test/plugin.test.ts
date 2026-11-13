@@ -61,7 +61,7 @@ test("native plugin registers separate key auth and secured driver without start
     assert.deepEqual(withKey.inferenceKey, { integrationID: "qwencloud-api-key", state: "stored-unverified", accountBinding: "unverified" })
     assert.equal(withKey.inference, "configured-unverified")
     assert.doesNotMatch(JSON.stringify(withKey), /private-key-id|PRIVATE-KEY-LABEL/)
-    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "invented" } })), /active management catalog/)
+    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "invented" } })), /active account-bound catalog/)
     keyConnected = false
     assert.equal((await Effect.runPromise(handlers.status())).inferenceKey.state, "not-connected")
     assert.equal(resolves, 0)
@@ -136,7 +136,8 @@ test("native OAuth resolution does not refresh valid near-expiry sessions or hid
   } finally { await Effect.runPromise(Scope.close(scope, Exit.void)); globalThis.fetch = original }
 })
 
-test("native provider fences its source to the inference key while the HTTP hook checks management catalog provenance", { timeout: 5000 }, async () => {
+test("native provider fences its key and account-bound documented support including preview expiry", { timeout: 5000 }, async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-12T00:00:00Z") })
   const fixture = fixtureContext()
   const registration = { dispose: Effect.void, events: { emit: () => Effect.void } }
   let keyConnection = { type: "credential", id: "fixture-key", method: "key", label: "PRIVATE" }
@@ -166,31 +167,45 @@ test("native provider fences its source to the inference key while the HTTP hook
     calls++
     assert.equal(input, "https://cli.qwencloud.com/data/v2/api.json")
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-access")
-    return Response.json({ code: "200", data: { Data: [{ Items: [{ Model: "qwen3.8-max" }] }] } })
+    return Response.json({ code: "200", data: { Data: [{ Items: [{ Model: "qwen3.8-max", Prices: [{ Type: "input_token", Price: "2", PriceUnit: "USD/1M tokens", PriceName: "Input" }, { Type: "output_token", Price: "6", PriceUnit: "USD/1M tokens", PriceName: "Output" }, { Type: "input_token_cache", Price: "0.25", PriceUnit: "USD/1M tokens", PriceName: "Implicit cache" }, { Type: "input_token_batch", Price: "1", PriceUnit: "USD/1M tokens", PriceName: "Batch input" }, { Type: "output_token_batch", Price: "3", PriceUnit: "USD/1M tokens", PriceName: "Batch output" }, { Type: "input_token_cache_creation_5m", Price: "2.5", PriceUnit: "USD/1M tokens", PriceName: "Explicit cache creation" }, { Type: "input_token_cache_read", Price: "0.17", PriceUnit: "USD/1M tokens", PriceName: "Explicit cache read" }], MultiPrices: [{ Prices: [{}] }] }] }] } })
   }
   const scope = await Effect.runPromise(Scope.make())
   try {
     await Effect.runPromise(plugin.effect(ctx as unknown as Plugin.Context).pipe(Scope.provide(scope)))
     assert.equal(fixture.resolves(), 0)
     assert.equal(inventory.sourceConnection.id, "fixture-key")
-    await Effect.runPromise(handlers.refresh())
+    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "qwen4-max-preview" } })), /active account-bound catalog/)
+    const refreshed = await Effect.runPromise(handlers.refresh())
+    assert.match(refreshed.pricing, /reference.*cache.*estimated/i)
+    assert.match(refreshed.pricing, /CLI display order and explicit-cache precedence/)
+    assert.deepEqual(refreshed.accountListed.models[0].pricing.Prices.map((item: { Price: string }) => item.Price), ["2", "6", "0.25", "1", "3", "2.5", "0.17"])
+    assert.equal("cache" in refreshed.accountListed.models[0].pricing, false)
     assert.equal(calls, 1)
     assert.equal(fixture.resolves(), 1)
-    assert.equal(inventory.models.length, 1)
+    assert.equal(inventory.models.length, 3)
     assert.equal(inventory.models[0].package, inventory.info.package)
+    assert.deepEqual(inventory.models[0].cost, [{ input: 2, output: 6, cache: { read: 0.17, write: 2.5 } }])
     assert.equal(inventory.info.settings.qwencloudTimeoutMs, 2345)
     assert.equal(inventory.sourceConnection.method, "key")
     assert.notEqual(inventory.sourceConnection.id, "fixture-account")
     await Effect.runPromise(hooks.get("http.request")!({ model: { id: "qwen3.8-max" } }))
-    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "invented" } })), /active management catalog/)
+    await Effect.runPromise(hooks.get("http.request")!({ model: { id: "qwen4-max-preview" } }))
+    await Effect.runPromise(hooks.get("http.request")!({ model: { id: "auto" } }))
+    assert.equal(refreshed.supported.find((model: any) => model.id === "qwen4-max-preview").metadata, "token-plan-documentation")
+    assert.deepEqual(inventory.models.find((model: any) => model.id === "qwen4-max-preview").cost, [])
+    for (const id of ["invented", "qwen4.0-max-preview"]) await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id } })), /active account-bound catalog/)
     keyConnection = { ...keyConnection, id: "other-key" }
     emit({ type: "credential.switched", data: { integrationID: "qwencloud-api-key" } })
     await keyReloaded
     assert.equal(inventory.sourceConnection.id, "other-key")
-    assert.equal(inventory.models.length, 1)
+    assert.equal(inventory.models.length, 3)
     assert.equal((await Effect.runPromise(handlers.status())).inferenceKey.accountBinding, "unverified")
+    t.mock.timers.setTime(Date.parse("2026-11-26T00:00:00+08:00"))
+    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "qwen4-max-preview" } })), /active account-bound catalog/)
+    assert.equal(inventory.models.length, 1)
+    await Effect.runPromise(hooks.get("http.request")!({ model: { id: "qwen3.8-max" } }))
     fixture.setConnection({ type: "credential", id: "other-account" as never, method: "oauth", label: "PRIVATE" })
-    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "qwen3.8-max" } })), /active management catalog/)
+    await assert.rejects(Effect.runPromise(hooks.get("http.request")!({ model: { id: "qwen3.8-max" } })), /active account-bound catalog/)
     assert.equal(inventory.models.length, 0)
     assert.ok(reloads >= 2)
     assert.equal(fixture.resolves(), 1)
