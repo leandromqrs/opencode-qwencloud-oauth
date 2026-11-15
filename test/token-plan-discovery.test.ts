@@ -24,6 +24,9 @@ test("cache restoration derives documented efforts for observed and supplemental
     assert.deepEqual(nativeModel(account).variants.map(variant => variant.id), account.efforts)
   }
   assert.deepEqual(result.supported.find(model => model.id === "auto")?.efforts, [])
+  const preview = nativeModel(result.supported.find(model => model.id === "qwen4-max-preview")!)
+  assert.deepEqual(preview.limit, { context: 1000000, output: 393216 })
+  assert.deepEqual(preview.capabilities, { tools: true, input: ["text", "image", "video"], output: ["text"] })
   assert.doesNotMatch(JSON.stringify([...storage.values.values()]), /reasoningEffort|efforts|qwen4-max-preview/)
 })
 

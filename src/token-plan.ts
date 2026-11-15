@@ -4,8 +4,9 @@ export const TOKEN_PLAN_SUPPORT = {
   sources: [
     "https://docs.qwencloud.com/token-plan/personal/token-plan-personal-overview",
     "https://docs.qwencloud.com/token-plan/team/token-plan-team-overview",
+    "https://docs.qwencloud.com/developer-guides/getting-started/latest-model",
   ],
-  reviewedAt: "2026-11-12",
+  reviewedAt: "2026-11-15",
   validFrom: "2026-11-11T10:00:00+08:00",
   validUntil: "2026-11-26T00:00:00+08:00",
 } as const
@@ -23,5 +24,13 @@ export function supplementTokenPlan(models: AccountModel[], now: number): Accoun
     if (inventory.some(model => model.id === id)) continue
     inventory.push({ id, context: null, inputLimit: null, output: null, inputModalities: null, outputModalities: null, efforts: documentedEfforts(id), metadata: "token-plan-documentation", provenance: TOKEN_PLAN_SUPPORT })
   }
-  return inventory
+  return inventory.map(model => model.id === "qwen4-max-preview" ? {
+    ...model,
+    context: model.context ?? 1000000,
+    output: model.output ?? 393216,
+    inputModalities: model.inputModalities ?? ["text", "image", "video"],
+    outputModalities: model.outputModalities ?? ["text"],
+    tools: model.tools ?? true,
+    provenance: TOKEN_PLAN_SUPPORT,
+  } : model)
 }

@@ -17,8 +17,8 @@ test("documented Token Plan models supplement a nonempty catalog with distinct p
     assert.deepEqual(model.provenance, TOKEN_PLAN_SUPPORT)
     const native = nativeModel(model)
     assert.deepEqual(native.cost, [])
-    assert.deepEqual(native.limit, { context: 0, output: 0 })
-    assert.deepEqual(native.capabilities, { tools: false, input: [], output: [] })
+    assert.deepEqual(native.limit, model.id === "qwen4-max-preview" ? { context: 1000000, output: 393216 } : { context: 0, output: 0 })
+    assert.deepEqual(native.capabilities, model.id === "qwen4-max-preview" ? { tools: true, input: ["text", "image", "video"], output: ["text"] } : { tools: false, input: [], output: [] })
     const efforts = model.id === "qwen4-max-preview" ? ["none", "low", "medium", "xhigh"] : []
     assert.deepEqual(model.efforts, efforts)
     assert.deepEqual(native.variants.map(variant => variant.id), efforts)
@@ -40,11 +40,37 @@ test("the documentation snapshot is time bounded and never extends Qwen4 preview
 
 test("advertised entries never overwrite management rates or fabricate an alias model", () => {
   const source = catalog(["qwen4-max-preview", "auto", "account-only"])
-  assert.deepEqual(supplementTokenPlan(source, during), source)
+  const supported = supplementTokenPlan(source, during)
+  assert.deepEqual(supported.slice(1), source.slice(1))
+  assert.equal(source[0].context, null)
+  assert.equal(supported[0].context, 1000000)
   assert.equal(supplementTokenPlan(catalog(), during).some(model => model.id === "qwen4.0-max-preview"), false)
   const alias = { ...catalog(["qwen4.0-max-preview"])[0], context: 1000000 }
   const canonical = { ...alias, id: "qwen4-max-preview", context: 900000 }
   const normalized = supplementTokenPlan([alias], during)
-  assert.deepEqual(normalized[0], { ...alias, id: "qwen4-max-preview" })
-  assert.deepEqual(supplementTokenPlan([alias, canonical], during).filter(model => model.id.startsWith("qwen4")), [canonical])
+  assert.equal(normalized[0].id, "qwen4-max-preview")
+  assert.deepEqual(nativeModel(normalized[0]).limit, { context: 1000000, output: 393216 })
+  const combined = supplementTokenPlan([alias, canonical], during).filter(model => model.id.startsWith("qwen4"))
+  assert.equal(combined.length, 1)
+  assert.deepEqual(nativeModel(combined[0]).limit, { context: 900000, output: 393216 })
+})
+
+test("documented preview defaults preserve known catalog limits, modalities and tariffs", () => {
+  const source = reconcileCatalog({ fetchedAt: 1, models: [{ id: "qwen4-max-preview", context: 800000, inputLimit: 700000, output: 65536, inputModalities: ["text"], outputModalities: ["text"], pricing: { Prices: [{ Type: "input", PriceUnit: "USD/1M tokens", Price: "1", PriceName: "input" }] } }] })
+  const before = structuredClone(source)
+  const supported = supplementTokenPlan(source, during)[0]
+  assert.deepEqual(nativeModel(supported).limit, { context: 800000, output: 65536 })
+  assert.deepEqual(nativeModel(supported).capabilities, { tools: true, input: ["text"], output: ["text"] })
+  assert.equal(supported.inputLimit, 700000)
+  assert.deepEqual(supported.pricing, source[0].pricing)
+  assert.equal(supported.metadata, "management-catalog")
+  assert.deepEqual(supported.provenance, TOKEN_PLAN_SUPPORT)
+  assert.deepEqual(source, before)
+})
+
+test("preview fallbacks retain explicit zero, empty modalities and disabled tools", () => {
+  const source = { ...catalog(["qwen4-max-preview"])[0], context: 0, output: 0, inputModalities: [], outputModalities: [], tools: false }
+  const supported = supplementTokenPlan([source], during)[0]
+  assert.deepEqual(nativeModel(supported).limit, { context: 0, output: 0 })
+  assert.deepEqual(nativeModel(supported).capabilities, { tools: false, input: [], output: [] })
 })
