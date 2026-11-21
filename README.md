@@ -44,6 +44,8 @@ Keys stay in OpenCode's credential storage, not plugin settings. Never paste the
 
 ## Status and details
 
+If the management quota RPC reports `session-expired`, sign in again with `opencode auth login qwencloud-oauth --method device` and fetch the account catalog again. QwenCloud management OAuth does not support automatic refresh. You do not need to replace your separate Token Plan API key to renew the management session.
+
 Account discovery and native request dispatch have been verified. Live checks returned purchase/quota errors, **not a completed generation**. A listed model is not proof of entitlement; an unrecognized quota response is not zero balance.
 
 [Architecture](ARCHITECTURE.md) · [Agent instructions](AGENTS.md) · [Contribution guide](CONTRIBUTING.md) · [Quota adapter](docs/quota.md) · [Protocol and verification evidence](docs/protocol-provenance.md)
