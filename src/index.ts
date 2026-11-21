@@ -6,21 +6,24 @@ import { CATALOG_CHANGED_EVENT, catalogRPC, connectionKey, createDiscovery, type
 import { nativeModel, type AccountModel } from "./inventory.js"
 import { API_BASE, DEFAULT_TIMEOUT_MS, KEY_INTEGRATION_ID } from "./transport.js"
 import { acquireQuotaBridge, parseQuotaBridge, type QuotaBridgeConfig } from "./quota-bridge-plugin.js"
+import { publishQwenCloudQuota } from "./quota-publication.js"
 
 export const PROVIDER_ID = Provider.ID.make("qwencloud")
 export const INTEGRATION_ID = Integration.ID.make("qwencloud-oauth")
 export { catalogRPC } from "./discovery.js"
 export { KEY_INTEGRATION_ID } from "./transport.js"
 
-export function parseOptions(options: Record<string, unknown>): { timeoutMs: number; quotaBridge?: QuotaBridgeConfig; quotaSource?: "individual-api" } {
-  if (Object.keys(options).some(key => key !== "timeoutMs" && key !== "quotaBridge" && key !== "quotaSource")) throw new Error("QwenCloud accepts only timeoutMs, quotaBridge and quotaSource; gateway overrides, fabricated models and unsafe inference bypasses are unsupported.")
+export function parseOptions(options: Record<string, unknown>): { timeoutMs: number; quotaBridge?: QuotaBridgeConfig; quotaSource?: "individual-api"; publishQuota?: true } {
+  if (Object.keys(options).some(key => key !== "timeoutMs" && key !== "quotaBridge" && key !== "quotaSource" && key !== "publishQuota")) throw new Error("Unsupported QwenCloud option.")
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1000 || Number(timeoutMs) > 600_000) throw new Error("Qwen timeoutMs must be between 1000 and 600000.")
   const quotaBridge = parseQuotaBridge(options.quotaBridge)
   const quotaSource = options.quotaSource
   if (quotaSource !== undefined && quotaSource !== "individual-api") throw new Error("QwenCloud quotaSource must be individual-api when set.")
   if (quotaSource && quotaBridge) throw new Error("Disable quotaBridge when using the Individual API.")
-  return { timeoutMs: Number(timeoutMs), ...(quotaBridge ? { quotaBridge } : {}), ...(quotaSource ? { quotaSource } : {}) }
+  if (options.publishQuota !== undefined && typeof options.publishQuota !== "boolean") throw new Error("QwenCloud publishQuota must be true or false.")
+  if (options.publishQuota === true && quotaSource !== "individual-api") throw new Error("QwenCloud publishQuota requires quotaSource: individual-api.")
+  return { timeoutMs: Number(timeoutMs), ...(quotaBridge ? { quotaBridge } : {}), ...(quotaSource ? { quotaSource } : {}), ...(options.publishQuota === true ? { publishQuota: true } : {}) }
 }
 
 export default Plugin.define({
@@ -94,5 +97,6 @@ export default Plugin.define({
       Stream.runForEach(event => discovery.handleEvent(event).pipe(Effect.andThen(synchronize))), Effect.catch(() => Effect.void), Effect.forkScoped,
     )
     yield* synchronize.pipe(Effect.andThen(Effect.sleep("15 seconds")), Effect.forever, Effect.forkScoped)
+    if (options.publishQuota) yield* publishQwenCloudQuota(ctx, discovery.quota).pipe(Effect.forkScoped)
   }),
 })

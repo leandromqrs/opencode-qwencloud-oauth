@@ -10,6 +10,16 @@ The response has `source: "qwencloud-individual-api"`. It reports only the obser
 
 This route follows the [official QwenCloud CLI 1.7.0 implementation](https://github.com/QwenCloud/qwencloud-cli/blob/v1.7.0/src/services/tokenplan-individual.ts); it is not documented as a stable public API. On 2026-11-21, the plugin's direct HTTP read through an isolated OpenCode host matched `bl`: used fraction `0.8197571410996534`, reset `2026-12-14T16:00:00.000Z`.
 
+## Publish Individual quota to OpenCode Quota
+
+With an OpenCode Quota build that supports published sources, set `"quotaSource": "individual-api"` and `"publishQuota": true` in the QwenCloud plugin options; leave `quotaBridge` off. Add this to `providers.custom` in OpenCode Quota's settings:
+
+```json
+{"id":"qwencloud-individual","providerId":"qwencloud","label":"QwenCloud","mode":"published"}
+```
+
+Both plugins must run in the same OpenCode location. QwenCloud only reads upstream if Quota accepts publications. It publishes sanitized `quota-v1` data about every 30 seconds or withdraws it when the read is unavailable. This path does not call `bl` or read inference credentials.
+
 ## Personal quota through the authenticated CLI
 
 When `quotaSource` is omitted, `qwencloud/quota` retains the existing `bl usage token-plan --output json` behavior on explicit requests only. Install the official `bailian-cli` and complete `bl auth login --console` in the account whose quota you want to inspect. The plugin does not read the CLI credential file or forward management credentials. No listener starts unless `quotaBridge` is explicitly configured. The CLI manages its own session and may refresh stored console credentials.
