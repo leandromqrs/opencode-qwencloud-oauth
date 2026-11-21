@@ -1,18 +1,22 @@
 # OpenCode QwenCloud OAuth
 
-Unofficial [QwenCloud](https://home.qwencloud.com/) integration for OpenCode V2: browser login, account model discovery, Token Plan chat and read-only quota.
+An unofficial [QwenCloud](https://home.qwencloud.com/) plugin for OpenCode V2. Sign in to discover the models listed for your account, then connect a separate Token Plan API key to use them in OpenCode.
+
+[Quick start](#quick-start) · [Quota and troubleshooting](#quota-and-troubleshooting) · [Development](#development)
 
 > [!IMPORTANT]
 > This is QwenCloud, not Qwen Code at `chat.qwen.ai`. OAuth reads management data; sending messages requires a separate Token Plan API key and available model quota.
 
-## Setup
+## Quick start
 
-Requires **Node.js 22+, npm and OpenCode 2.2.5**.
+Requires **Node.js 22+**, npm, a QwenCloud account, and OpenCode V2. The plugin pins the OpenCode 2.2.5 SDK; browser login and catalog refresh have also been verified on a 2.3.2 host.
 
-1. Build this checkout:
+1. Clone and build the plugin:
 
    ```sh
-   npm ci
+   git clone https://github.com/leandromqrs/opencode-qwencloud-oauth.git
+   cd opencode-qwencloud-oauth
+   npm ci --ignore-scripts
    npm run build
    ```
 
@@ -22,7 +26,7 @@ Requires **Node.js 22+, npm and OpenCode 2.2.5**.
    { "package": "/absolute/path/to/opencode-qwencloud-oauth" }
    ```
 
-3. Sign in through the authorization link shown by OpenCode:
+3. From a project that loads the plugin, start device login and open the authorization link:
 
    ```sh
    opencode auth login qwencloud-oauth --method device
@@ -34,7 +38,7 @@ Requires **Node.js 22+, npm and OpenCode 2.2.5**.
    opencode api post '/api/rpc/qwencloud/refresh?location[directory]=/absolute/path/to/project' --data '{"input":{}}'
    ```
 
-5. Create a Token Plan key at [API Keys](https://home.qwencloud.com/api-keys), then enter it in OpenCode's native prompt:
+5. To send messages, select an existing Token Plan key or create one at [API Keys](https://home.qwencloud.com/api-keys), then enter it in OpenCode's native prompt:
 
    ```sh
    opencode auth login qwencloud-api-key
@@ -42,10 +46,20 @@ Requires **Node.js 22+, npm and OpenCode 2.2.5**.
 
 Keys stay in OpenCode's credential storage, not plugin settings. Never paste them into chat or commit them. Login does not create keys; missing quota never triggers purchases or PAYG fallback.
 
-## Status and details
+## Quota and troubleshooting
 
-If the management quota RPC reports `session-expired`, sign in again with `opencode auth login qwencloud-oauth --method device` and fetch the account catalog again. QwenCloud management OAuth does not support automatic refresh. You do not need to replace your separate Token Plan API key to renew the management session.
+- **`session-expired`:** repeat device login and refresh the catalog. Management OAuth does not refresh automatically; leave your Token Plan API key unchanged.
+- **`invalid-response` from management quota:** the plugin could not interpret the response. It does not mean your session expired or your balance is zero.
+- **`cli-not-found` from Token Plan quota:** OpenCode cannot find the official Bailian CLI (`bl`). See the [quota guide](docs/quota.md) for CLI setup and the optional OpenCode Quota panel bridge.
 
-Account discovery and native request dispatch have been verified. Live checks returned purchase/quota errors, **not a completed generation**. A listed model is not proof of entitlement; an unrecognized quota response is not zero balance.
+Catalog visibility does not guarantee that your key can use a model. The [Token Plan notes](docs/token-plan.md) distinguish observed catalog metadata, documented additions, and live checks.
 
-[Architecture](ARCHITECTURE.md) · [Agent instructions](AGENTS.md) · [Contribution guide](CONTRIBUTING.md) · [Quota adapter](docs/quota.md) · [Protocol and verification evidence](docs/protocol-provenance.md)
+## Development
+
+```sh
+npm run typecheck
+npm test
+npm run build
+```
+
+[Architecture](ARCHITECTURE.md) · [Configuration examples](examples) · [Protocol evidence](docs/protocol-provenance.md)
