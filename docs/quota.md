@@ -2,9 +2,17 @@
 
 QwenCloud exposes authenticated quota reads through its control-plane gateway. The old conclusion that Qwen Code subscriptions do not expose quota does **not** apply to this service.
 
+## Individual quota without a CLI
+
+Set `quotaSource: "individual-api"` in the plugin options, leave `quotaBridge` disabled, and sign in to `qwencloud-oauth` in OpenCode. On an explicit `qwencloud/quota` request, the plugin exchanges the active management OAuth credential for a short-lived gateway credential using `GenerateCLIAccessToken`, then calls the Singapore Individual usage route. It uses neither the inference API key nor any CLI credential files, and does not persist the derived credential.
+
+The response has `source: "qwencloud-individual-api"`. It reports only the observed personal monthly window, including a reset timestamp when present. It does not claim the inference key belongs to that account, convert a weekly window to monthly, or fall back to `bl` or BSS when the API fails. Expired management sessions require signing in to OpenCode again.
+
+This route follows the [official QwenCloud CLI 1.7.0 implementation](https://github.com/QwenCloud/qwencloud-cli/blob/v1.7.0/src/services/tokenplan-individual.ts); it is not documented as a stable public API. On 2026-11-21, the plugin's direct HTTP read through an isolated OpenCode host matched `bl`: used fraction `0.8197571410996534`, reset `2026-12-14T16:00:00.000Z`.
+
 ## Personal quota through the authenticated CLI
 
-`qwencloud/quota` runs `bl usage token-plan --output json` on explicit requests only. Install the official `bailian-cli` and complete `bl auth login --console` in the account whose quota you want to inspect. The plugin does not read the CLI credential file or forward management credentials. No listener starts unless `quotaBridge` is explicitly configured. The CLI manages its own session and may refresh stored console credentials.
+When `quotaSource` is omitted, `qwencloud/quota` retains the existing `bl usage token-plan --output json` behavior on explicit requests only. Install the official `bailian-cli` and complete `bl auth login --console` in the account whose quota you want to inspect. The plugin does not read the CLI credential file or forward management credentials. No listener starts unless `quotaBridge` is explicitly configured. The CLI manages its own session and may refresh stored console credentials.
 
 The native result identifies `source: alibaba-console-cli` and `accountBinding: unverified`: console login is independent of both QwenCloud OAuth and the inference key. A monthly `personalWindows` entry preserves the provider's used fraction and optional reset timestamp; quota-v1 projects remaining percentage, not invented credit totals. Missing values and explicit zero remain distinct. No result is cached or attributed to the active management account. Expired or absent management OAuth does not block this independently authenticated read.
 

@@ -12,12 +12,15 @@ export const INTEGRATION_ID = Integration.ID.make("qwencloud-oauth")
 export { catalogRPC } from "./discovery.js"
 export { KEY_INTEGRATION_ID } from "./transport.js"
 
-export function parseOptions(options: Record<string, unknown>): { timeoutMs: number; quotaBridge?: QuotaBridgeConfig } {
-  if (Object.keys(options).some(key => key !== "timeoutMs" && key !== "quotaBridge")) throw new Error("QwenCloud accepts only timeoutMs and quotaBridge; gateway overrides, fabricated models and unsafe inference bypasses are unsupported.")
+export function parseOptions(options: Record<string, unknown>): { timeoutMs: number; quotaBridge?: QuotaBridgeConfig; quotaSource?: "individual-api" } {
+  if (Object.keys(options).some(key => key !== "timeoutMs" && key !== "quotaBridge" && key !== "quotaSource")) throw new Error("QwenCloud accepts only timeoutMs, quotaBridge and quotaSource; gateway overrides, fabricated models and unsafe inference bypasses are unsupported.")
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1000 || Number(timeoutMs) > 600_000) throw new Error("Qwen timeoutMs must be between 1000 and 600000.")
   const quotaBridge = parseQuotaBridge(options.quotaBridge)
-  return { timeoutMs: Number(timeoutMs), ...(quotaBridge ? { quotaBridge } : {}) }
+  const quotaSource = options.quotaSource
+  if (quotaSource !== undefined && quotaSource !== "individual-api") throw new Error("QwenCloud quotaSource must be individual-api when set.")
+  if (quotaSource && quotaBridge) throw new Error("Disable quotaBridge when using the Individual API.")
+  return { timeoutMs: Number(timeoutMs), ...(quotaBridge ? { quotaBridge } : {}), ...(quotaSource ? { quotaSource } : {}) }
 }
 
 export default Plugin.define({
@@ -34,7 +37,7 @@ export default Plugin.define({
     const discovery = createDiscovery(ctx, (models, connection) => Effect.gen(function* () {
       discovered = { models, connection }
       yield* ctx.provider.reload()
-    }), data => notify(data))
+    }), data => notify(data), { quotaSource: options.quotaSource })
     const synchronize = Effect.gen(function* () {
       yield* discovery.synchronize
       const next = yield* ctx.integration.connection.active(KEY_INTEGRATION_ID)

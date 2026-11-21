@@ -9,6 +9,30 @@ import { readQwenCloudQuota, toQwenCloudQuotaV1 } from "../src/quota.js"
 const listing = (...ids: string[]) => ({ code: "200", data: { Data: [{ Items: ids.map(Model => ({ Model })) }] } })
 const createDiscovery = (...args: Parameters<typeof createAccountDiscovery>) => createAccountDiscovery(args[0], args[1], args[2], { now: () => Date.parse("2026-11-10T00:00:00Z"), ...args[3] })
 
+test("Individual API quota never invokes the CLI and discards a switched account result", async () => {
+  const fixture = fixtureContext()
+  let requests = 0
+  const discovery = createDiscovery(fixture.ctx, () => Effect.void, undefined, {
+    quotaSource: "individual-api",
+    quotaRunner: async () => assert.fail("Individual quota must not invoke the CLI"),
+    fetch: async () => {
+      if (++requests === 1) return Response.json({ code: "200", successResponse: true, data: { cliAccessToken: "derived-token" } })
+      fixture.setConnection({ type: "credential", id: "different-account" as never, method: "oauth", label: "Other" })
+      return Response.json({ code: "200", successResponse: true, data: {
+        success: true, DataV2: { ret: ["SUCCESS::ok"], data: { code: "SUCCESS", success: true, data: { per1MonthPercentage: 0.25 } } },
+      } })
+    },
+  })
+  await Effect.runPromise(discovery.synchronize)
+  assert.equal(requests, 0)
+  const switched = readQwenCloudQuota(await Effect.runPromise(discovery.quota))
+  assert.deepEqual(switched.diagnostics, [{ action: "quota", code: "account-changed" }])
+  assert.equal(switched.personalWindows, undefined)
+  fixture.setConnection(undefined)
+  assert.equal((await Effect.runPromise(discovery.quota)).state, "disconnected")
+  assert.equal(requests, 2)
+})
+
 test("native quota is a fresh independently authenticated CLI read, not an OAuth-bound cache or startup command", async () => {
   const storage = memoryStorage()
   const fixture = fixtureContext(storage.storage)

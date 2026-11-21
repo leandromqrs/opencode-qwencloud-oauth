@@ -3,7 +3,9 @@ const MAX_BYTES = 262_144
 const MAX_BALANCES = 32
 const TIMEOUT_MS = 10_000
 const DECIMAL = /^\d+(?:\.\d+)?$/
-const actions = ["quota", "AlibabaTokenPlanUsage", "QuerySubscriptionGray", "GetSeatSubscriptionSummary", "DescribeFrInstances"] as const
+const individualSource = "qwencloud-individual-api"
+const sources = ["qwencloud-token-plan", "alibaba-console-cli", individualSource] as const
+const actions = ["quota", "AlibabaTokenPlanUsage", "GenerateCLIAccessToken", "IndividualTokenPlanUsage", "QuerySubscriptionGray", "GetSeatSubscriptionSummary", "DescribeFrInstances"] as const
 const states = ["disconnected", "ready", "partial", "error", "unknown"] as const
 const kinds = ["personal", "team", "addon"] as const
 const scopes = ["personal", "team-aggregate", "unknown"] as const
@@ -36,7 +38,7 @@ export interface QwenCloudPersonalWindow {
 
 export interface QwenCloudQuota {
   state: typeof states[number]
-  source: "qwencloud-token-plan" | "alibaba-console-cli"
+  source: typeof sources[number]
   accountBinding?: "unverified"
   observedAt: string
   balances: QwenCloudQuotaBalance[]
@@ -51,7 +53,7 @@ export const qwenCloudQuotaSchema = {
   type: "object", additionalProperties: false,
   required: ["state", "source", "observedAt", "balances", "diagnostics"],
   properties: {
-    state: { enum: states }, source: { enum: ["qwencloud-token-plan", "alibaba-console-cli"] }, observedAt: timeSchema,
+    state: { enum: states }, source: { enum: sources }, observedAt: timeSchema,
     accountBinding: { const: "unverified" },
     personalWindows: { type: "array", maxItems: 1, items: {
       type: "object", additionalProperties: false, required: ["period", "scope", "usedFraction"],
@@ -113,9 +115,11 @@ function onlyKeys(value: Record<string, unknown>, allowed: string[]): boolean {
 export function readQwenCloudQuota(value: unknown): QwenCloudQuota {
   try {
     const data = record(value)
-    if (!onlyKeys(data, ["state", "source", "observedAt", "balances", "diagnostics", "personalWindows", "accountBinding"]) || !states.includes(data.state as QwenCloudQuota["state"]) || !["qwencloud-token-plan", "alibaba-console-cli"].includes(data.source as string) || typeof data.observedAt !== "string" || iso(data.observedAt) !== data.observedAt || !Array.isArray(data.balances) || data.balances.length > MAX_BALANCES || !Array.isArray(data.diagnostics) || data.diagnostics.length > 32) throw new Error()
+    if (!onlyKeys(data, ["state", "source", "observedAt", "balances", "diagnostics", "personalWindows", "accountBinding"]) || !states.includes(data.state as QwenCloudQuota["state"]) || !sources.includes(data.source as QwenCloudQuota["source"]) || typeof data.observedAt !== "string" || iso(data.observedAt) !== data.observedAt || !Array.isArray(data.balances) || data.balances.length > MAX_BALANCES || !Array.isArray(data.diagnostics) || data.diagnostics.length > 32) throw new Error()
     const cli = data.source === "alibaba-console-cli"
-    if (cli ? data.accountBinding !== "unverified" || data.balances.length > 0 : "accountBinding" in data || "personalWindows" in data) throw new Error()
+    const individual = data.source === individualSource
+    if (cli ? data.accountBinding !== "unverified" : "accountBinding" in data) throw new Error()
+    if (cli || individual ? data.balances.length > 0 : "personalWindows" in data) throw new Error()
     if ("personalWindows" in data && (!Array.isArray(data.personalWindows) || data.personalWindows.length > 1)) throw new Error()
     const personalWindows = (data.personalWindows as unknown[] | undefined)?.map(raw => {
       const window = record(raw)
@@ -135,7 +139,7 @@ export function readQwenCloudQuota(value: unknown): QwenCloudQuota {
     const diagnostics = data.diagnostics.map(raw => {
       const d = record(raw)
       if (!onlyKeys(d, ["action", "code"]) || !actions.includes(d.action as QwenCloudQuotaDiagnostic["action"]) || !codes.includes(d.code as QwenCloudQuotaDiagnostic["code"])) throw new Error()
-      if (cli !== (d.action === "AlibabaTokenPlanUsage")) throw new Error()
+      if (cli !== (d.action === "AlibabaTokenPlanUsage") || (!individual && (d.action === "GenerateCLIAccessToken" || d.action === "IndividualTokenPlanUsage")) || (individual && d.action !== "quota" && d.action !== "GenerateCLIAccessToken" && d.action !== "IndividualTokenPlanUsage")) throw new Error()
       return { ...d } as unknown as QwenCloudQuotaDiagnostic
     })
     const measured = balances.some(b => b.total !== undefined || b.remaining !== undefined) || !!personalWindows?.length
@@ -164,11 +168,20 @@ function business(data: Record<string, unknown>): void {
 }
 
 async function request(action: QwenCloudQuotaDiagnostic["action"], params: Record<string, string>, token: string, fetcher: typeof fetch, signal: AbortSignal): Promise<Record<string, unknown>> {
+  const raw = await requestJson(GATEWAY, JSON.stringify({ product: "BssOpenAPI-V3", action, region: "ap-southeast-1", params }), token, fetcher, signal)
+  if (raw.code !== "200") throw new Failure("business-error")
+  business(raw)
+  const data = record(raw.data)
+  business(data)
+  return data
+}
+
+async function requestJson(url: string, body: string | URLSearchParams, token: string, fetcher: typeof fetch, signal: AbortSignal): Promise<Record<string, unknown>> {
   signal.throwIfAborted()
-  const response = await cancellable(fetcher(GATEWAY, {
+  const response = await cancellable(fetcher(url, {
     method: "POST", redirect: "error", signal,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ product: "BssOpenAPI-V3", action, region: "ap-southeast-1", params }),
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": typeof body === "string" ? "application/json" : "application/x-www-form-urlencoded", Accept: "application/json" },
+    body,
   }).then(response => {
     if (signal.aborted) { void response.body?.cancel().catch(() => {}); throw new Failure("cancelled") }
     return response
@@ -190,15 +203,64 @@ async function request(action: QwenCloudQuotaDiagnostic["action"], params: Recor
       if (bytes > MAX_BYTES) throw new Failure("body-too-large")
       chunks.push(next.value)
     }
-    let raw: Record<string, unknown>
-    try { raw = record(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)))) }
+    try { return record(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)))) }
     catch { throw new Failure("invalid-response") }
-    if (raw.code !== "200") throw new Failure("business-error")
-    business(raw)
-    const data = record(raw.data)
-    business(data)
-    return data
   } finally { void reader.cancel().catch(() => {}); reader.releaseLock() }
+}
+
+const individualRoute = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage"
+const individualGateway = `https://ap-southeast-1-cs-data.qwencloud.com/cli/api.json?${new URLSearchParams({
+  action: "BroadScopeAspnGateway", product: "sfm_bailian", api: individualRoute,
+})}`
+const validBearer = (value: unknown): value is string => typeof value === "string" && /^[\x21-\x7e]{1,32768}$/.test(value)
+
+export function individualQuotaResult(state: "disconnected" | "unknown" | "error", code?: QwenCloudQuotaDiagnostic["code"], action: QwenCloudQuotaDiagnostic["action"] = "quota"): QwenCloudQuota {
+  return { state, source: individualSource, observedAt: new Date().toISOString(), balances: [], diagnostics: code ? [{ action, code }] : [] }
+}
+
+export async function getIndividualQuota(accessToken: string, fetcher: typeof fetch = globalThis.fetch, signal?: AbortSignal): Promise<QwenCloudQuota> {
+  if (!validBearer(accessToken)) return individualQuotaResult("error", "invalid-credentials")
+  const deadline = AbortSignal.timeout(TIMEOUT_MS)
+  const combined = signal ? AbortSignal.any([signal, deadline]) : deadline
+  let action: QwenCloudQuotaDiagnostic["action"] = "GenerateCLIAccessToken"
+  try {
+    const issue = await requestJson(GATEWAY, JSON.stringify({
+      product: "ModelStudioRegional", action, version: "2026-02-10", region: "ap-southeast-1", params: {},
+    }), accessToken, fetcher, combined)
+    const confirmed = (outer: Record<string, unknown>) => {
+      if (outer.code === "401" || outer.code === "403") throw new Failure("unauthorized")
+      if (outer.code !== "200" || outer.successResponse !== true) throw new Failure("business-error")
+      return record(outer.data)
+    }
+    const derived = confirmed(issue).cliAccessToken
+    if (!validBearer(derived) || derived === accessToken) throw new Failure("invalid-response")
+    action = "IndividualTokenPlanUsage"
+    const usage = confirmed(await requestJson(individualGateway, new URLSearchParams({
+      params: JSON.stringify({ Api: individualRoute, V: "1.0", Data: { cornerstoneParam: {
+        protocol: "V2", console: "ONE_CONSOLE", xsp_lang: "en-US", productCode: "p_efm", switchUserType: 3, consoleSite: "QWENCLOUD",
+      } } }),
+      region: "ap-southeast-1",
+    }), derived, fetcher, combined))
+    if (usage.success === false && usage.errorCode === "BailianGateway.Login.NotLogined") throw new Failure("unauthorized")
+    if (usage.success !== true || ("errorCode" in usage && usage.errorCode !== "")) throw new Failure("business-error")
+    const envelope = record(usage.DataV2)
+    if (!Array.isArray(envelope.ret) || typeof envelope.ret[0] !== "string" || !envelope.ret[0].startsWith("SUCCESS::")) throw new Failure("business-error")
+    const payload = record(envelope.data)
+    if (payload.success !== true || payload.code !== "SUCCESS") throw new Failure("business-error")
+    const data = payload.data == null ? undefined : record(payload.data)
+    const fraction = data?.per1MonthPercentage
+    if (fraction == null) return individualQuotaResult("unknown", "missing-balance", action)
+    if (typeof fraction !== "number" || !Number.isFinite(fraction) || fraction < 0 || fraction > 1) throw new Failure("invalid-amount")
+    const ms = data?.per1MonthResetTime
+    const resetAt = typeof ms === "number" ? reset(ms) : undefined
+    if (ms != null && !resetAt) throw new Failure("invalid-reset")
+    return {
+      state: "ready", source: individualSource, observedAt: new Date().toISOString(), balances: [], diagnostics: [],
+      personalWindows: [{ period: "monthly", scope: "personal", usedFraction: fraction, ...(resetAt ? { resetAt } : {}) }],
+    }
+  } catch (error) {
+    return individualQuotaResult("error", signal?.aborted ? "cancelled" : deadline.aborted ? "timeout" : error instanceof Failure ? error.code : "network-error", action)
+  }
 }
 
 function scaled(value: string, places: number): bigint {
@@ -322,7 +384,7 @@ export function toQwenCloudQuotaV1(value: QwenCloudQuota): { version: "quota-v1"
   const quota = readQwenCloudQuota(value)
   const entries: QwenCloudQuotaV1Entry[] = []
   for (const window of quota.personalWindows ?? []) entries.push({
-    kind: "percent", name: "alibaba-console-personal-monthly", label: "Alibaba console Token Plan monthly remaining (account unverified)", resultType: "quota",
+    kind: "percent", name: "alibaba-console-personal-monthly", label: quota.source === individualSource ? "QwenCloud Individual Token Plan monthly remaining" : "Alibaba console Token Plan monthly remaining (account unverified)", resultType: "quota",
     percentRemaining: 100 - window.usedFraction * 100, observedAtIso: quota.observedAt,
     ...(window.resetAt ? { resetTimeIso: window.resetAt } : {}),
   })

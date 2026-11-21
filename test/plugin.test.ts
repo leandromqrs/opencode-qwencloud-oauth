@@ -9,6 +9,9 @@ import { fixtureContext, memoryStorage } from "./discovery-support.js"
 test("configuration cannot enable an inference bypass or fabricate models", () => {
   assert.deepEqual(parseOptions({}), { timeoutMs: 600_000 })
   assert.deepEqual(parseOptions({ timeoutMs: 120_000 }), { timeoutMs: 120_000 })
+  assert.deepEqual(parseOptions({ quotaSource: "individual-api" }), { timeoutMs: 600_000, quotaSource: "individual-api" })
+  assert.throws(() => parseOptions({ quotaSource: "individual-api", quotaBridge: { port: 62367 } }))
+  assert.throws(() => parseOptions({ quotaSource: "unknown" }))
   for (const options of [{ unsafe: true }, { models: ["invented"] }, { baseURL: "https://evil.test" }, { timeoutMs: 0 }]) assert.throws(() => parseOptions(options))
 })
 
