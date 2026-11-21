@@ -189,26 +189,34 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
       return yield* catalog
     }).pipe(Effect.ensuring(Effect.sync(() => { refreshing = false })))
   })
-  const authenticatedQuota = (individual: boolean) => Effect.gen(function* () {
-    const disconnected = () => individual ? Effect.succeed(individualQuotaResult("disconnected")) : Effect.promise(() => getQwenCloudQuota())
+  const authenticatedQuota = (source: "individual-api" | "management-bss") => Effect.gen(function* () {
+    const individual = source === "individual-api"
+    const disconnected = individual
+      ? Effect.sync(() => individualQuotaResult("disconnected"))
+      : Effect.promise(() => getQwenCloudQuota())
     const fail = (code: "session-expired" | "credentials-unavailable" | "account-changed") => individual ? individualQuotaResult("error", code) : quotaFailure(code)
     const connection = yield* current
-    if (!connection || !connectionKey(connection)) return yield* disconnected()
+    const account = connectionKey(connection)
+    if (!connection || !account) return yield* disconnected
+
+    const activeAccount = active.pipe(Effect.map(connectionKey))
     const credential = yield* ctx.integration.connection.resolve(connection).pipe(Effect.catch(() => Effect.succeed(undefined)))
-    const resolvedConnection = yield* active
-    if (connectionKey(connection) !== connectionKey(resolvedConnection)) return connectionKey(resolvedConnection) ? fail("account-changed") : yield* disconnected()
+    const resolvedAccount = yield* activeAccount
+    if (account !== resolvedAccount) return resolvedAccount ? fail("account-changed") : yield* disconnected
     const authState = observeManagement(connection, credential)
     if (authState === "expired") return fail("session-expired")
     if (authState === "unavailable" || credential?.type !== "oauth") return fail("credentials-unavailable")
+
     const readQuota = individual ? getIndividualQuota : getQwenCloudQuota
     const result = yield* Effect.promise(signal => readQuota(credential.access, dependencies.fetch, signal))
-    const completedConnection = yield* active
-    if (connectionKey(connection) !== connectionKey(completedConnection)) return connectionKey(completedConnection) ? fail("account-changed") : yield* disconnected()
-    if (result.diagnostics.some(d => d.code === "unauthorized" && (!individual || d.action === "GenerateCLIAccessToken"))) management = { connection: connectionKey(connection)!, state: "unauthorized" }
+    const completedAccount = yield* activeAccount
+    if (account !== completedAccount) return completedAccount ? fail("account-changed") : yield* disconnected
+    const managementDenied = result.diagnostics.some(d => d.code === "unauthorized" && (!individual || d.action === "GenerateCLIAccessToken"))
+    if (managementDenied) management = { connection: account, state: "unauthorized" }
     return result
   })
-  const managementQuota = authenticatedQuota(false)
-  const quota = dependencies.quotaSource === "individual-api" ? authenticatedQuota(true)
+  const managementQuota = authenticatedQuota("management-bss")
+  const quota = dependencies.quotaSource === "individual-api" ? authenticatedQuota("individual-api")
     : Effect.promise(signal => readAlibabaConsoleQuota({ runner: dependencies.quotaRunner, workspaceRoot: ctx.location?.directory }, signal))
   return { refresh, status, catalog, quota, managementQuota, handleEvent, synchronize: current.pipe(Effect.asVoid), bindings: (connection: ActiveConnection) => cached && connectionKey(cached.connection) === connectionKey(connection) ? supportedModels(cached.snapshot.catalog) : [] }
 }

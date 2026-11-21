@@ -214,6 +214,55 @@ const individualGateway = `https://ap-southeast-1-cs-data.qwencloud.com/cli/api.
 })}`
 const validBearer = (value: unknown): value is string => typeof value === "string" && /^[\x21-\x7e]{1,32768}$/.test(value)
 
+function confirmedGatewayData(outer: Record<string, unknown>): Record<string, unknown> {
+  if (outer.code === "401" || outer.code === "403") throw new Failure("unauthorized")
+  if (outer.code !== "200" || outer.successResponse !== true) throw new Failure("business-error")
+  return record(outer.data)
+}
+
+async function issueIndividualToken(accessToken: string, fetcher: typeof fetch, signal: AbortSignal): Promise<string> {
+  const response = await requestJson(GATEWAY, JSON.stringify({
+    product: "ModelStudioRegional", action: "GenerateCLIAccessToken", version: "2026-02-10", region: "ap-southeast-1", params: {},
+  }), accessToken, fetcher, signal)
+  const derivedToken = confirmedGatewayData(response).cliAccessToken
+  if (!validBearer(derivedToken) || derivedToken === accessToken) throw new Failure("invalid-response")
+  return derivedToken
+}
+
+async function readIndividualWindow(derivedToken: string, fetcher: typeof fetch, signal: AbortSignal): Promise<QwenCloudPersonalWindow | undefined> {
+  const params = {
+    Api: individualRoute,
+    V: "1.0",
+    Data: { cornerstoneParam: {
+      protocol: "V2", console: "ONE_CONSOLE", xsp_lang: "en-US", productCode: "p_efm", switchUserType: 3, consoleSite: "QWENCLOUD",
+    } },
+  }
+  const body = new URLSearchParams({ params: JSON.stringify(params), region: "ap-southeast-1" })
+  const gateway = confirmedGatewayData(await requestJson(individualGateway, body, derivedToken, fetcher, signal))
+  if (gateway.success === false && gateway.errorCode === "BailianGateway.Login.NotLogined") throw new Failure("unauthorized")
+  if (gateway.success !== true || ("errorCode" in gateway && gateway.errorCode !== "")) throw new Failure("business-error")
+  const envelope = record(gateway.DataV2)
+  const receipt = Array.isArray(envelope.ret) ? envelope.ret[0] : undefined
+  if (typeof receipt !== "string" || !receipt.startsWith("SUCCESS::")) throw new Failure("business-error")
+  const payload = record(envelope.data)
+  if (payload.success !== true || payload.code !== "SUCCESS") throw new Failure("business-error")
+  if (payload.data == null) return undefined
+
+  const usage = record(payload.data)
+  const usedFraction = usage.per1MonthPercentage
+  if (usedFraction == null) return undefined
+  if (typeof usedFraction !== "number" || !Number.isFinite(usedFraction) || usedFraction < 0 || usedFraction > 1) throw new Failure("invalid-amount")
+  const resetTime = usage.per1MonthResetTime
+  const resetAt = typeof resetTime === "number" ? reset(resetTime) : undefined
+  if (resetTime != null && !resetAt) throw new Failure("invalid-reset")
+  return { period: "monthly", scope: "personal", usedFraction, ...(resetAt ? { resetAt } : {}) }
+}
+
+function quotaFailureCode(error: unknown, timedRequest: AbortSignal, caller?: AbortSignal): QwenCloudQuotaDiagnostic["code"] {
+  if (timedRequest.aborted) return caller?.aborted ? "cancelled" : "timeout"
+  return error instanceof Failure ? error.code : "network-error"
+}
+
 export function individualQuotaResult(state: "disconnected" | "unknown" | "error", code?: QwenCloudQuotaDiagnostic["code"], action: QwenCloudQuotaDiagnostic["action"] = "quota"): QwenCloudQuota {
   return { state, source: individualSource, observedAt: new Date().toISOString(), balances: [], diagnostics: code ? [{ action, code }] : [] }
 }
@@ -224,42 +273,16 @@ export async function getIndividualQuota(accessToken: string, fetcher: typeof fe
   const combined = signal ? AbortSignal.any([signal, deadline]) : deadline
   let action: QwenCloudQuotaDiagnostic["action"] = "GenerateCLIAccessToken"
   try {
-    const issue = await requestJson(GATEWAY, JSON.stringify({
-      product: "ModelStudioRegional", action, version: "2026-02-10", region: "ap-southeast-1", params: {},
-    }), accessToken, fetcher, combined)
-    const confirmed = (outer: Record<string, unknown>) => {
-      if (outer.code === "401" || outer.code === "403") throw new Failure("unauthorized")
-      if (outer.code !== "200" || outer.successResponse !== true) throw new Failure("business-error")
-      return record(outer.data)
-    }
-    const derived = confirmed(issue).cliAccessToken
-    if (!validBearer(derived) || derived === accessToken) throw new Failure("invalid-response")
+    const derivedToken = await issueIndividualToken(accessToken, fetcher, combined)
     action = "IndividualTokenPlanUsage"
-    const usage = confirmed(await requestJson(individualGateway, new URLSearchParams({
-      params: JSON.stringify({ Api: individualRoute, V: "1.0", Data: { cornerstoneParam: {
-        protocol: "V2", console: "ONE_CONSOLE", xsp_lang: "en-US", productCode: "p_efm", switchUserType: 3, consoleSite: "QWENCLOUD",
-      } } }),
-      region: "ap-southeast-1",
-    }), derived, fetcher, combined))
-    if (usage.success === false && usage.errorCode === "BailianGateway.Login.NotLogined") throw new Failure("unauthorized")
-    if (usage.success !== true || ("errorCode" in usage && usage.errorCode !== "")) throw new Failure("business-error")
-    const envelope = record(usage.DataV2)
-    if (!Array.isArray(envelope.ret) || typeof envelope.ret[0] !== "string" || !envelope.ret[0].startsWith("SUCCESS::")) throw new Failure("business-error")
-    const payload = record(envelope.data)
-    if (payload.success !== true || payload.code !== "SUCCESS") throw new Failure("business-error")
-    const data = payload.data == null ? undefined : record(payload.data)
-    const fraction = data?.per1MonthPercentage
-    if (fraction == null) return individualQuotaResult("unknown", "missing-balance", action)
-    if (typeof fraction !== "number" || !Number.isFinite(fraction) || fraction < 0 || fraction > 1) throw new Failure("invalid-amount")
-    const ms = data?.per1MonthResetTime
-    const resetAt = typeof ms === "number" ? reset(ms) : undefined
-    if (ms != null && !resetAt) throw new Failure("invalid-reset")
+    const window = await readIndividualWindow(derivedToken, fetcher, combined)
+    if (!window) return individualQuotaResult("unknown", "missing-balance", action)
     return {
       state: "ready", source: individualSource, observedAt: new Date().toISOString(), balances: [], diagnostics: [],
-      personalWindows: [{ period: "monthly", scope: "personal", usedFraction: fraction, ...(resetAt ? { resetAt } : {}) }],
+      personalWindows: [window],
     }
   } catch (error) {
-    return individualQuotaResult("error", signal?.aborted ? "cancelled" : deadline.aborted ? "timeout" : error instanceof Failure ? error.code : "network-error", action)
+    return individualQuotaResult("error", quotaFailureCode(error, combined, signal), action)
   }
 }
 
@@ -281,7 +304,7 @@ export async function getQwenCloudQuota(accessToken?: string, fetcher: typeof fe
     if (!result.diagnostics.some(d => d.action === action && d.code === code)) result.diagnostics.push({ action, code })
   }
   if (accessToken === undefined || accessToken === "") return { ...result, state: "disconnected" }
-  if (typeof accessToken !== "string" || !/^[\x21-\x7e]{1,32768}$/.test(accessToken)) return { ...result, state: "error", diagnostics: [{ action: "quota", code: "invalid-credentials" }] }
+  if (!validBearer(accessToken)) return { ...result, state: "error", diagnostics: [{ action: "quota", code: "invalid-credentials" }] }
   const controller = new AbortController()
   const onAbort = () => controller.abort()
   signal?.addEventListener("abort", onAbort, { once: true })
@@ -290,7 +313,7 @@ export async function getQwenCloudQuota(accessToken?: string, fetcher: typeof fe
   const call = async (action: QwenCloudQuotaDiagnostic["action"], params: Record<string, string> = {}) => {
     try { return await request(action, params, accessToken, fetcher, controller.signal) }
     catch (error) {
-      diagnostic(action, controller.signal.aborted ? signal?.aborted ? "cancelled" : "timeout" : error instanceof Failure ? error.code : "network-error")
+      diagnostic(action, quotaFailureCode(error, controller.signal, signal))
       return undefined
     }
   }
