@@ -69,20 +69,20 @@ export default Plugin.define({
     yield* ctx.integration.transform(editor => {
       editor.method.update({
         integrationID: INTEGRATION_ID,
-        method: { id: METHOD_ID, type: "oauth", label: "Sign in with QwenCloud" },
+        method: { id: METHOD_ID, type: "oauth", label: "Sign in to QwenCloud" },
         authorize: () => Effect.gen(function* () {
           const login = yield* Effect.acquireRelease(
             Effect.tryPromise({ try: signal => beginLogin({ clientID, signal }), catch: authorizationStartError }).pipe(Effect.tap(login => Effect.sync(() => { logins.add(login) }))),
             login => Effect.sync(() => { logins.delete(login); login.cancel() }),
           )
           return { mode: "auto" as const, url: login.url, expiresAt: login.expiresAt,
-            instructions: "Authorize QwenCloud management access in the browser. No model request or key reset is made. Like the official CLI, inference requires a separate Token Plan API key created at https://home.qwencloud.com/api-keys (shown once), connected using QwenCloud API key. Key ownership remains unverified; a successful request verifies inference access only.",
+            instructions: "Sign in to load your models and check your quota. To send messages, connect a Token Plan API key separately under QwenCloud API key. Create a key at https://home.qwencloud.com/api-keys; it is shown only once. The key's account is not verified.",
             callback: Effect.tryPromise({ try: () => login.callback, catch: error => error }),
           }
         }),
       })
-      editor.update(INTEGRATION_ID, integration => { integration.name = "QwenCloud" })
-      editor.method.update({ integrationID: KEY_INTEGRATION_ID, method: { type: "key", label: "Store a separate inference API key (not verified)" } })
+      editor.update(INTEGRATION_ID, integration => { integration.name = "QwenCloud account" })
+      editor.method.update({ integrationID: KEY_INTEGRATION_ID, method: { type: "key", label: "Enter your QwenCloud Token Plan API key" } })
       editor.update(KEY_INTEGRATION_ID, integration => { integration.name = "QwenCloud API key" })
     })
     yield* ctx.session.hook("http.request", event => Effect.gen(function* () {
