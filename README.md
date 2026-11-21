@@ -32,7 +32,7 @@ Requires **Node.js 22+**, npm, a QwenCloud account, and OpenCode V2. The plugin 
    opencode auth login qwencloud-oauth --method device
    ```
 
-4. Fetch the account catalog, replacing the path with a location that loads the plugin:
+4. The plugin fetches the account catalog automatically after connecting. If it needs to be refreshed manually, replace the path with a location that loads the plugin:
 
    ```sh
    opencode api post '/api/rpc/qwencloud/refresh?location[directory]=/absolute/path/to/project' --data '{"input":{}}'

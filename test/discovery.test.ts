@@ -130,6 +130,24 @@ test("startup and status do not resolve credentials or issue HTTP; metadata surv
   assert.equal((await Effect.runPromise(second.catalog)).supported.length, 0)
 })
 
+test("connecting a management account automatically discovers its models", async () => {
+  const fixture = fixtureContext()
+  fixture.setConnection(undefined)
+  let calls = 0
+  const discovery = createDiscovery(fixture.ctx, () => Effect.void, undefined, {
+    fetch: async () => { calls++; return Response.json(listing("qwen3.8-max")) },
+  })
+  await Effect.runPromise(discovery.synchronize)
+  fixture.setConnection({ type: "credential", id: "new-account" as never, method: "oauth", label: "Qwen" })
+  await Effect.runPromise(discovery.handleEvent({ type: "credential.updated", data: {} }))
+  assert.equal(calls, 0)
+  await Effect.runPromise(discovery.handleEvent({ type: "credential.switched", data: { integrationID: "qwencloud-oauth" } }))
+  assert.equal(calls, 1)
+  assert.equal((await Effect.runPromise(discovery.catalog)).supported.length, 1)
+  await Effect.runPromise(discovery.handleEvent({ type: "credential.switched", data: { integrationID: "qwencloud-oauth" } }))
+  assert.equal(calls, 1)
+})
+
 test("403 invalidates shared cache and never publishes stale metadata", async () => {
   const storage = memoryStorage()
   const fixture = fixtureContext(storage.storage)

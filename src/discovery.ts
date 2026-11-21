@@ -53,6 +53,7 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
   let storageState: "available" | "invalid" | "unavailable" = "available"
   let management: { connection: string; state: ManagementState; expires?: number } | undefined
   const denied = new Set<string>()
+  const automaticAttempts = new Set<string>()
   const lock = Semaphore.makeUnsafe(1)
   const active = Effect.suspend(() => ctx.integration.connection.active("qwencloud-oauth"))
   const observeManagement = (connection: ActiveConnection, credential: { type: string; expires?: number; access?: string } | undefined): ManagementState => {
@@ -145,6 +146,13 @@ export function createDiscovery(ctx: Plugin.Context, publish: (models: AccountMo
       yield* lock.withPermit(Effect.sync(() => { denied.add(hash) }))
     }
     yield* current
+    if (envelope?.type === "credential.switched" && data?.integrationID === "qwencloud-oauth") {
+      const key = connectionKey(yield* active)
+      if (key && !cached && !automaticAttempts.has(key)) {
+        automaticAttempts.add(key)
+        yield* refresh
+      }
+    }
   }).pipe(Effect.asVoid)
   const refresh = Effect.gen(function* () {
     if (refreshing) return { error: "Qwen catalog refresh is already running." }
