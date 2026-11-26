@@ -109,7 +109,7 @@ function screenInlineImages(body: Record<string, unknown>): void {
 // DashScope only understands function tools: a message carrying a "custom" (freeform) tool call fails
 // validation with "tool_calls.N.function Field required". Replay such calls as function calls so history
 // stays valid, and drop the custom declarations it cannot represent.
-function downgradeCustomTools(body: Record<string, unknown>): void {
+export function downgradeCustomTools(body: Record<string, unknown>): void {
   const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)
   if (Array.isArray(body.messages)) {
     for (const message of body.messages) {

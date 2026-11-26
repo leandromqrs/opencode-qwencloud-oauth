@@ -1,8 +1,8 @@
 import { model as compatibleModel, type Settings } from "@opencode/ai/providers/openai-compatible"
 import { LanguageModel } from "@opencode/ai"
 import { Effect } from "effect"
-import { FetchHttpClient } from "effect/http"
-import { API_BASE, DEFAULT_TIMEOUT_MS, isInferenceKey, prepareRequest } from "./transport.js"
+import { FetchHttpClient, HttpClientRequest } from "effect/http"
+import { API_BASE, DEFAULT_TIMEOUT_MS, downgradeCustomTools, isInferenceKey, prepareRequest } from "./transport.js"
 
 /** Native Token Plan model with a deadline covering dispatch and streamed responses. */
 export function model(modelID: string, settings: Settings): ReturnType<typeof compatibleModel> {
@@ -17,6 +17,9 @@ export function model(modelID: string, settings: Settings): ReturnType<typeof co
   const native = compatibleModel(modelID, { ...options, apiKey, baseURL: API_BASE, provider: "qwencloud" })
   const transport = native.route.transport
   const route = native.route.with({ transport: { ...transport,
+    // Newer hosts dispatch through their own client and never reach the secured fetch below, so tool-call
+    // downgrading is applied to the prepared body as well.
+    prepare: (input) => transport.prepare(input).pipe(Effect.map(prepared => ({ ...prepared, request: downgradePreparedBody(prepared.request) }))),
     execute: (...args) => Effect.gen(function* () {
       const fetcher = yield* FetchHttpClient.Fetch
       const lifetime = yield* Effect.acquireRelease(Effect.sync(() => {
@@ -73,4 +76,18 @@ export function model(modelID: string, settings: Settings): ReturnType<typeof co
     }),
   } })
   return LanguageModel.update(native, { route })
+}
+
+const decoder = new TextDecoder()
+
+function downgradePreparedBody<Request extends HttpClientRequest.HttpClientRequest>(request: Request): Request {
+  const body = request.body
+  if (body._tag !== "Uint8Array" || request.headers["content-encoding"] !== undefined) return request
+  let parsed: unknown
+  try { parsed = JSON.parse(decoder.decode(body.body)) } catch { return request }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return request
+  const before = JSON.stringify(parsed)
+  downgradeCustomTools(parsed as Record<string, unknown>)
+  const after = JSON.stringify(parsed)
+  return after === before ? request : HttpClientRequest.bodyText(request, after, "application/json") as Request
 }
