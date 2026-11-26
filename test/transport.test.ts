@@ -34,6 +34,33 @@ test("missing inference key directs manual creation without resolving OAuth or a
   await assert.rejects(prepareRequest(new Request(`${API_BASE}/chat/completions`, { method: "POST", body: "{}" }), "", [], { plan: "token-plan" }), /https:\/\/home\.qwencloud\.com\/api-keys/)
 })
 
+test("freeform tool calls replay as function calls and custom declarations are dropped", async () => {
+  const body = {
+    model: "catalog-model",
+    messages: [
+      { role: "assistant", content: null, tool_calls: [
+        { id: "call_1", type: "custom", custom: { name: "execute", input: "paths.slice(0,40)" } },
+        { id: "call_2", type: "function", function: { name: "read", arguments: "{}" } },
+      ] },
+      { role: "tool", tool_call_id: "call_1", content: "ok" },
+    ],
+    tools: [
+      { type: "custom", custom: { name: "execute", format: { type: "text" } } },
+      { type: "function", function: { name: "read", parameters: { type: "object" } } },
+    ],
+    tool_choice: { type: "custom", custom: { name: "execute" } },
+  }
+  const request = new Request(`${API_BASE}/chat/completions`, { method: "POST", body: JSON.stringify(body) })
+  const sent = await (await prepareRequest(request, "sk-sp-fixture", ["catalog-model"], { plan: "token-plan" })).json() as typeof body
+  assert.deepEqual(sent.messages[0]!.tool_calls![0], { id: "call_1", type: "function", function: { name: "execute", arguments: JSON.stringify({ input: "paths.slice(0,40)" }) } })
+  assert.deepEqual(sent.messages[0]!.tool_calls![1], body.messages[0]!.tool_calls![1])
+  assert.deepEqual(sent.tools, [body.tools[1]])
+  assert.equal(sent.tool_choice, "auto")
+
+  const only = new Request(`${API_BASE}/chat/completions`, { method: "POST", body: JSON.stringify({ model: "catalog-model", messages: [], tools: [body.tools[0]], tool_choice: "auto", parallel_tool_calls: true }) })
+  assert.deepEqual(await (await prepareRequest(only, "sk-sp-fixture", ["catalog-model"], { plan: "token-plan" })).json(), { model: "catalog-model", messages: [] })
+})
+
 test("auto rejects documented unsupported controls without dropping or changing other model payloads", async () => {
   for (const extra of [{ tool_choice: "auto" }, { thinking_budget: 0 }, { tool_choice: null }, { thinking_budget: null }]) {
     const request = (model: string) => new Request(`${API_BASE}/chat/completions`, { method: "POST", body: JSON.stringify({ model, messages: [], ...extra }) })

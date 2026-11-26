@@ -106,6 +106,35 @@ function screenInlineImages(body: Record<string, unknown>): void {
   }
 }
 
+// DashScope only understands function tools: a message carrying a "custom" (freeform) tool call fails
+// validation with "tool_calls.N.function Field required". Replay such calls as function calls so history
+// stays valid, and drop the custom declarations it cannot represent.
+function downgradeCustomTools(body: Record<string, unknown>): void {
+  const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)
+  if (Array.isArray(body.messages)) {
+    for (const message of body.messages) {
+      if (!isRecord(message) || !Array.isArray(message.tool_calls)) continue
+      message.tool_calls = message.tool_calls.map((call: unknown) => {
+        if (!isRecord(call) || call.type !== "custom" || !isRecord(call.custom)) return call
+        const { type: _type, custom, ...rest } = call
+        const { name, input } = custom as Record<string, unknown>
+        return { ...rest, type: "function", function: { name, arguments: JSON.stringify({ input: typeof input === "string" ? input : "" }) } }
+      })
+    }
+  }
+  if (Array.isArray(body.tools)) {
+    const declared = body.tools.length
+    const kept = body.tools.filter((tool: unknown) => !isRecord(tool) || tool.type !== "custom")
+    body.tools = kept
+    if (kept.length === 0 && declared > 0) {
+      delete body.tools
+      delete body.tool_choice
+      delete body.parallel_tool_calls
+    }
+  }
+  if (isRecord(body.tool_choice) && body.tool_choice.type === "custom") body.tool_choice = "auto"
+}
+
 export async function prepareRequest(request: Request, apiKey: string, allowedModels: readonly string[], routing: InferenceRouting, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<Request> {
   const base = inferenceBase(routing)
   if (request.url !== `${base}/chat/completions` || request.method !== "POST") throw new Error("Unsupported QwenCloud inference destination.")
@@ -124,6 +153,7 @@ export async function prepareRequest(request: Request, apiKey: string, allowedMo
   if (typeof body.model !== "string" || !allowedModels.includes(body.model)) throw new Error("QwenCloud model is not in the active catalog.")
   if (body.model === "auto" && (Object.hasOwn(body, "tool_choice") || Object.hasOwn(body, "thinking_budget"))) throw new Error("QwenCloud auto does not support tool_choice or thinking_budget.")
   screenInlineImages(body)
+  downgradeCustomTools(body)
   const headers = new Headers({ Accept: "application/json", "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` })
   return new Request(`${base}/chat/completions`, { method: "POST", headers, body: JSON.stringify(body), redirect: "error", signal: signal ?? AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)]) })
 }
